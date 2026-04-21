@@ -14,7 +14,12 @@ export type SelectConfig<T> = {
   initialIndex?: number;
   pageSize?: number;
   helpHint?: string;
+  actionKeys?: string[];
 };
+
+export type SelectResult<T> =
+  | { type: "select"; value: T }
+  | { type: "action"; key: string; value: T };
 
 const C = {
   dim: (s: string) => `\x1b[2m${s}\x1b[0m`,
@@ -51,8 +56,18 @@ type Key = {
 export async function selectFromList<T>(
   cfg: SelectConfig<T>,
 ): Promise<T | undefined> {
+  const result = await selectFromListEx(cfg);
+  if (!result) return undefined;
+  if (result.type === "select") return result.value;
+  return undefined;
+}
+
+export async function selectFromListEx<T>(
+  cfg: SelectConfig<T>,
+): Promise<SelectResult<T> | undefined> {
   const options = cfg.options;
   if (options.length === 0) return undefined;
+  const actionKeys = new Set((cfg.actionKeys ?? []).map((k) => k.toLowerCase()));
 
   const isTTY = Boolean(stdout.isTTY) && Boolean(stdin.isTTY);
   if (!isTTY) {
@@ -144,7 +159,7 @@ export async function selectFromList<T>(
 
   render();
 
-  return new Promise<T | undefined>((resolve) => {
+  return new Promise<SelectResult<T> | undefined>((resolve) => {
     let finished = false;
 
     const onKeypress = (_str: string | undefined, key: Key | undefined): void => {
@@ -162,12 +177,24 @@ export async function selectFromList<T>(
       if (key.ctrl && key.name === "c") {
         return finish(undefined);
       }
+
+      const keyName = key.name?.toLowerCase();
+      if (keyName && actionKeys.has(keyName)) {
+        const picked = options[cursor];
+        if (!picked || picked.disabled) return;
+        return finish({ type: "action", key: keyName, value: picked.value });
+      }
+
       switch (key.name) {
         case "up":
-        case "k":
           return move(-1);
         case "down":
+          return move(1);
+        case "k":
+          if (actionKeys.has("k")) return;
+          return move(-1);
         case "j":
+          if (actionKeys.has("j")) return;
           return move(1);
         case "pageup":
           return move(-pageSize);
@@ -182,21 +209,23 @@ export async function selectFromList<T>(
           viewTop = clampViewTop(cursor, pageSize, options.length, viewTop);
           return render();
         case "escape":
+          return finish(undefined);
         case "q":
+          if (actionKeys.has("q")) return;
           return finish(undefined);
         case "return":
         case "space":
         case "enter": {
           const picked = options[cursor];
           if (!picked || picked.disabled) return;
-          return finish(picked.value);
+          return finish({ type: "select", value: picked.value });
         }
         default:
           return;
       }
     };
 
-    const finish = (value: T | undefined): void => {
+    const finish = (value: SelectResult<T> | undefined): void => {
       if (finished) return;
       finished = true;
       stdin.off("keypress", onKeypress);

@@ -90,7 +90,11 @@ import {
   formatBytes,
   type ParsedImage,
 } from "./images.ts";
-import { selectFromList, type SelectOption } from "./select.ts";
+import {
+  selectFromList,
+  selectFromListEx,
+  type SelectOption,
+} from "./select.ts";
 import {
   countRunning,
   formatRuntime,
@@ -316,7 +320,7 @@ function printHelp(): void {
       "  /plans               Pick an open plan → View / Refine / Execute",
       "  /plans all           Same as /plans, but includes done plans",
       "  /plan done <slug>    Mark a plan as done (renames to .plan.done.md)",
-      "  /jobs                List background jobs (shell + subagents); interactive picker",
+      "  /jobs                List jobs; Enter = log, Del/Backspace = kill selected",
       "  /jobs kill <id>      Kill a running job (SIGTERM → SIGKILL)",
       "  /jobs log <id>       Tail the log of a job",
       "  /agents              List available subagent definitions (.blackbox/agents/*.md)",
@@ -727,10 +731,12 @@ function printJobLog(jobId: string): void {
   console.log("");
 }
 
+type PickedJob = { action: "log" | "kill"; job: JobSummary };
+
 async function pickJob(
   jobs: JobSummary[],
   rl: readline.Interface,
-): Promise<JobSummary | undefined> {
+): Promise<PickedJob | undefined> {
   const isTTY = Boolean(process.stdout.isTTY) && Boolean(process.stdin.isTTY);
   if (!isTTY || jobs.length === 0) return undefined;
   rl.pause();
@@ -740,14 +746,20 @@ async function pickJob(
       hint: `${formatRuntime(j.runtimeMs)}  ${j.label.slice(0, 60)}`,
       value: i,
     }));
-    const picked = await selectFromList<number>({
+    const result = await selectFromListEx<number>({
       title: `Select job (${jobs.length}):`,
       options,
       pageSize: Math.min(12, jobs.length),
-      helpHint: "  ↑↓ move · Enter show log · Esc cancel",
+      actionKeys: ["delete", "backspace"],
+      helpHint: "  ↑↓ move · Enter show log · Del kill · Esc cancel",
     });
-    if (picked === undefined) return undefined;
-    return jobs[picked];
+    if (!result) return undefined;
+    const job = jobs[result.value];
+    if (!job) return undefined;
+    return {
+      action: result.type === "action" ? "kill" : "log",
+      job,
+    };
   } finally {
     rl.resume();
   }
@@ -1223,7 +1235,15 @@ async function main(): Promise<void> {
       const jobs = printJobsList();
       if (jobs.length > 0) {
         const picked = await pickJob(jobs, rl);
-        if (picked) printJobLog(picked.id);
+        if (picked) {
+          if (picked.action === "kill") {
+            console.log("");
+            console.log(killJob(picked.job.id));
+            console.log("");
+          } else {
+            printJobLog(picked.job.id);
+          }
+        }
       }
       continue;
     }
