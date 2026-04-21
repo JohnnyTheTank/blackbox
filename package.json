@@ -1,0 +1,26 @@
+{
+  "name": "blackbox",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Minimal CLI coding agent using OpenRouter tool calling",
+  "type": "module",
+  "bin": {
+    "blackbox": "src/index.ts"
+  },
+  "scripts": {
+    "dev": "tsx --env-file=.env src/index.ts",
+    "start": "tsx --env-file=.env src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "openai": "^4.104.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
