@@ -47,7 +47,7 @@ Requires Node.js >= 20.12.
 | `/exit` / `exit` | Quit (also Ctrl-C)                                 |
 
 Full list of tool-capable models:
-<https://openrouter.ai/models?supported_parameters=tools>
+<https://openrouter.ai/models?supported_parameters=tools&fmt=cards&categories=programming>
 
 ## Tools
 
