@@ -76,6 +76,7 @@ import {
   formatBytes,
   type ParsedImage,
 } from "./images.ts";
+import { selectFromList, type SelectOption } from "./select.ts";
 
 function parseModelFlag(argv: string[]): string | undefined {
   for (let i = 0; i < argv.length; i++) {
@@ -90,12 +91,21 @@ function parseModelFlag(argv: string[]): string | undefined {
   return undefined;
 }
 
-function resolveInitialModel(): string {
+type InitialModelResolution = {
+  model: string;
+  source: "flag" | "persisted" | "default";
+};
+
+function resolveInitialModel(): InitialModelResolution {
   const fromFlag = parseModelFlag(process.argv.slice(2));
-  if (fromFlag && fromFlag.length > 0) return fromFlag;
+  if (fromFlag && fromFlag.length > 0) {
+    return { model: fromFlag, source: "flag" };
+  }
   const persisted = readPersistedState().model;
-  if (persisted && persisted.length > 0) return persisted;
-  return DEFAULT_MODEL;
+  if (persisted && persisted.length > 0) {
+    return { model: persisted, source: "persisted" };
+  }
+  return { model: DEFAULT_MODEL, source: "default" };
 }
 
 const C = {
@@ -197,7 +207,11 @@ function printTools(calls: ToolCallRecord[]): void {
       )}`,
     );
   });
-  console.log(C.dim("\n  Use /tool <n> to see full args and result."));
+  console.log(
+    C.dim(
+      "\n  Use /tool for an interactive picker, or /tool <n> for details.",
+    ),
+  );
   console.log("");
 }
 
@@ -253,10 +267,11 @@ function printHelp(): void {
       C.bold("Commands:"),
       "  /help            Show this help",
       "  /model           Show the current model",
-      "  /model <slug>    Switch model (e.g. /model openai/gpt-5)",
-      "  /models          Curated list of common tool-capable models",
+      "  /model <slug>    Switch model directly (e.g. /model openai/gpt-5.4)",
+      "  /models          Interactive model picker (↑↓ + Enter)",
       "  /paste [text]    Attach the macOS clipboard image, optionally with text",
       "  /tools           List tool calls from the last agent run",
+      "  /tool            Interactive tool-call picker (↑↓ + Enter)",
       "  /tool <n>        Show full args and result for tool call #n",
       "  /reset           Clear the chat history",
       "  /exit, exit      Quit (also Ctrl-C)",
@@ -310,15 +325,96 @@ function printModels(current: string): void {
   console.log("");
 }
 
+function modelOptions(current: string): SelectOption<string>[] {
+  return CURATED_MODELS.map((m) => ({
+    label: m,
+    value: m,
+    hint: m === current ? "← current" : undefined,
+  }));
+}
+
+async function pickModel(
+  current: string,
+  rl?: readline.Interface,
+): Promise<string | undefined> {
+  const isTTY = Boolean(process.stdout.isTTY) && Boolean(process.stdin.isTTY);
+  if (!isTTY) {
+    printModels(current);
+    return undefined;
+  }
+  console.log("");
+  rl?.pause();
+  let picked: string | undefined;
+  try {
+    const curIdx = CURATED_MODELS.indexOf(current);
+    picked = await selectFromList<string>({
+      title: "Select model (tool-calling capable):",
+      options: modelOptions(current),
+      initialIndex: curIdx >= 0 ? curIdx : 0,
+      pageSize: Math.min(12, CURATED_MODELS.length),
+    });
+  } finally {
+    rl?.resume();
+  }
+  if (!picked) {
+    console.log(C.dim("  (selection cancelled)\n"));
+    return undefined;
+  }
+  return picked;
+}
+
+async function pickToolCall(
+  calls: ToolCallRecord[],
+  rl?: readline.Interface,
+): Promise<number | undefined> {
+  if (calls.length === 0) return undefined;
+  const isTTY = Boolean(process.stdout.isTTY) && Boolean(process.stdin.isTTY);
+  if (!isTTY) return undefined;
+  rl?.pause();
+  try {
+    const options: SelectOption<number>[] = calls.map((c, i) => ({
+      label: `${i + 1}. ${c.name}(${shortenArgs(c.args)})`,
+      hint: `→ ${c.result.length} chars`,
+      value: i,
+    }));
+    const picked = await selectFromList<number>({
+      title: "Select tool call:",
+      options,
+      pageSize: Math.min(12, calls.length),
+    });
+    return picked;
+  } finally {
+    rl?.resume();
+  }
+}
+
 async function main(): Promise<void> {
-  let model = resolveInitialModel();
-  persistModel(model);
+  const initial = resolveInitialModel();
+  let model = initial.model;
   let history = buildInitialHistory();
   let lastToolCalls: ToolCallRecord[] = [];
   const spinner = createSpinner();
 
   console.log(C.bold(C.cyan("blackbox") + " — minimal CLI coding agent"));
   console.log(C.dim(`  Workspace: ${WORKSPACE_ROOT}`));
+
+  const isTTY = Boolean(process.stdout.isTTY) && Boolean(process.stdin.isTTY);
+  if (initial.source === "default" && isTTY) {
+    console.log(
+      C.dim(
+        "  No model set yet — pick one (Esc to skip and use the default).",
+      ),
+    );
+    const picked = await selectFromList<string>({
+      title: "Select a default model:",
+      options: modelOptions(model),
+      initialIndex: Math.max(0, CURATED_MODELS.indexOf(model)),
+      pageSize: Math.min(12, CURATED_MODELS.length),
+    });
+    if (picked) model = picked;
+  }
+  persistModel(model);
+
   console.log(C.dim(`  Model:     ${model}`));
   console.log(
     C.dim("  Tip: /help for commands, Ctrl-C cancels a run or exits when idle."),
@@ -408,9 +504,16 @@ async function main(): Promise<void> {
     if (entry.startsWith("/tool ") || entry === "/tool") {
       const rest = entry === "/tool" ? "" : entry.slice("/tool ".length).trim();
       if (rest.length === 0) {
-        console.log(
-          C.red("  /tool requires an index, e.g. /tool 2. Use /tools to list."),
-        );
+        if (lastToolCalls.length === 0) {
+          console.log(
+            C.dim("  No tool calls from the last run yet. Run a prompt first."),
+          );
+        } else {
+          const picked = await pickToolCall(lastToolCalls, rl);
+          if (picked !== undefined) {
+            printToolDetail(lastToolCalls, String(picked + 1));
+          }
+        }
       } else {
         printToolDetail(lastToolCalls, rest);
       }
@@ -418,12 +521,23 @@ async function main(): Promise<void> {
     }
 
     if (entry === "/models") {
-      printModels(model);
+      const picked = await pickModel(model, rl);
+      if (picked && picked !== model) {
+        model = picked;
+        persistModel(model);
+        console.log(C.green(`Switched model to: ${model}\n`));
+      } else if (picked === model) {
+        console.log(C.dim(`  Model unchanged: ${model}\n`));
+      }
       continue;
     }
 
     if (entry === "/model") {
-      console.log(C.dim(`Current model: ${model}`));
+      console.log(
+        C.dim(
+          `Current model: ${model}\n  Tip: /models for interactive picker, /model <slug> to set directly.`,
+        ),
+      );
       continue;
     }
 
