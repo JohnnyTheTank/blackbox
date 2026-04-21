@@ -1,116 +1,38 @@
 # blackbox
 
 A minimal CLI coding agent in TypeScript that talks to tool-calling-capable
-LLMs through the [OpenRouter](https://openrouter.ai) API. Inspired by the video
-_"How does Claude Code actually work?"_ — a simple "harness" with a handful of
-tools and a small agentic loop.
+LLMs via the [OpenRouter](https://openrouter.ai) API. 
+
+## Quickstart
+
+```bash
+git clone https://github.com/JohnnyTheTank/blackbox.git && cd blackbox
+npm install
+echo "OPENROUTER_API_KEY=sk-or-..." > .env
+npm link           # registers the global `blackbox` command
+blackbox           # run it from any project folder
+```
+
+Run `blackbox` inside any project folder — it uses the current working
+directory as its sandbox. The API key is always read from the `.env` inside
+the blackbox install directory, so you configure it once and never leak it
+into target projects.
+
+Requires Node.js >= 20.12.
 
 ## Features
 
-- **Seven tools**: file system (`read_file`, `list_files`, `edit_file`), shell
-  (`execute_bash`), HTTP (`fetch_url`), plus OpenRouter server tools for web
-  search and the current date/time.
-- **Workspace sandbox**: All file access is limited to the directory the CLI is
-  started from (`WORKSPACE_ROOT`). `execute_bash` runs with
-  `cwd=WORKSPACE_ROOT`.
-- **Agentic loop**: Up to 25 iterations per prompt; tool calls are executed
-  automatically and fed back to the model.
-- **Model switching**: slash command `/model <slug>` or CLI flag `--model`.
-- **Multi-turn chat**: History is kept between prompts; `/reset` clears it.
-
-## Setup
-
-Requirement: Node.js >= 20.12 (`process.loadEnvFile` is used internally).
-
-```bash
-cp .env.example .env
-# put your OPENROUTER_API_KEY into .env
-npm install
-```
-
-## Use it in any project
-
-The CLI uses **the directory it is started from** as its sandbox root, so the
-typical flow is: install once, then `cd` into any project and run `blackbox`.
-
-### Option A — global command via `npm link` (recommended)
-
-From the blackbox repo:
-
-```bash
-npm link       # creates a global 'blackbox' command
-```
-
-Then, from any project folder:
-
-```bash
-cd ~/code/some-other-project
-blackbox
-# or: blackbox --model openai/gpt-5
-```
-
-To uninstall:
-
-```bash
-npm run unlink
-```
-
-### Option B — run from the repo without linking
-
-```bash
-cd ~/code/some-other-project
-/path/to/blackbox/bin/blackbox.mjs
-```
-
-Or inside the blackbox repo itself:
-
-```bash
-npm run dev                 # operates on the blackbox repo as workspace
-npm run dev -- --model openai/gpt-5
-```
-
-### How `.env` is resolved
-
-The API key is always loaded from the `.env` **inside the blackbox install
-directory** (not from the target project). You configure the key once and can
-then use `blackbox` in any project without exposing the key to it.
-
-## Example prompts
-
-Typical one-liners that exercise the different tools:
-
-```text
-> explain the stack of this project
-> find all TODO comments under src/ and fix them
-> summarize the docs at https://vitejs.dev/guide/
-> search the web for the latest React 19 release notes
-> what time is it in Berlin right now?
-```
-
-The agent picks the right tools on its own (e.g. `list_files` + `read_file` for
-the first prompt, `fetch_url` for the third, `openrouter:web_search` for the
-fourth, `openrouter:datetime` for the last).
-
-## Images
-
-Any `.png`, `.jpg`, `.jpeg`, `.gif` or `.webp` reference in your prompt is
-auto-attached as an image part for vision-capable models. Three ways to do it:
-
-```text
-> look at ~/Desktop/shot.png and tell me what the error says
-> compare https://example.com/logo.png with ./public/logo.png
-> /paste what is shown in this screenshot?
-```
-
-- **Local files** (absolute, relative, or with `~`) are read from disk and sent
-  as base64 data URLs.
-- **http(s) URLs** are passed through — OpenRouter fetches them for the model.
-- **`/paste`** (macOS only) dumps the clipboard PNG into a temp file via
-  `osascript` and attaches it. An optional prompt after `/paste` is appended.
-
-Limits: max **8 images** per prompt, max **10 MB** per local file. If the
-active model slug does not look vision-capable, a yellow warning is shown but
-the request is still sent.
+- **Five local tools**: `read_file`, `list_files`, `edit_file`,
+  `execute_bash`, `fetch_url`, plus two OpenRouter server tools
+  (`web_search`, `datetime`).
+- **Workspace sandbox**: file tools are hard-pinned to `cwd`;
+  `execute_bash` runs with `cwd` as its working directory.
+- **Agentic loop**: up to 50 iterations per prompt, tool calls executed
+  and fed back automatically.
+- **Multi-turn chat** with history; `/reset` clears it.
+- **Model switching** via `/model <slug>` or `--model`.
+- **Vision**: local images, URLs, and macOS clipboard (`/paste`) are
+  auto-attached for vision-capable models.
 
 ## Slash commands
 
@@ -129,74 +51,36 @@ Full list of tool-capable models:
 
 ## Tools
 
-### Local (function tools)
+| Tool                    | Purpose                                             |
+| ----------------------- | --------------------------------------------------- |
+| `read_file`             | Read a file inside the sandbox                      |
+| `list_files`            | List files/subdirs (depth 2)                        |
+| `edit_file`             | Overwrite a file inside the sandbox                 |
+| `execute_bash`          | Run a shell command (30s timeout)                   |
+| `fetch_url`             | Fetch a public http(s) URL; HTML stripped to text   |
+| `openrouter:web_search` | Real-time web search with citations (~$4 / 1k hits) |
+| `openrouter:datetime`   | Current date and time (free)                        |
 
-| Tool           | Parameters              | Sandbox / Notes                                                                             |
-| -------------- | ----------------------- | ------------------------------------------------------------------------------------------- |
-| `read_file`    | `path`                  | hard (`assertInside`)                                                                       |
-| `list_files`   | `path?` (default: root) | hard (`assertInside`)                                                                       |
-| `edit_file`    | `path`, `content`       | hard (`assertInside`)                                                                       |
-| `execute_bash` | `command`               | `cwd`-pinned                                                                                |
-| `fetch_url`    | `url`, `max_bytes?`     | none (network); 15s timeout, 500 KB default cap; HTML stripped to text, JSON pretty-printed |
+Tool results are truncated at ~8000 characters to keep context small.
 
-### Remote (OpenRouter server tools)
+## Images
 
-These are executed by OpenRouter itself — the model decides when to call them
-and the result is transparently injected into the conversation.
-
-| Tool                    | Purpose                             | Pricing                            |
-| ----------------------- | ----------------------------------- | ---------------------------------- |
-| `openrouter:web_search` | Real-time web search with citations | ~$4 per 1000 results (Exa default) |
-| `openrouter:datetime`   | Current date and time               | free                               |
-
-See the [OpenRouter docs](https://openrouter.ai/docs/guides/features/server-tools/web-search)
-for configuration options (search engine, domain filters, etc.).
-
-Tool results are truncated at ~8000 characters to keep the context small.
-
-## Project layout
-
-```
-bin/
-  blackbox.mjs   # launcher that spawns tsx on src/index.ts
-src/
-  index.ts       # CLI REPL, slash commands, model switching
-  agent.ts       # OpenAI SDK client + agentic loop
-  tools.ts       # tool schemas + local tool implementations
-  sandbox.ts     # WORKSPACE_ROOT + assertInside() guard
-  images.ts      # image detection, base64 loading, /paste clipboard dump
-package.json
-.env.example
-```
+Any `.png`, `.jpg`, `.jpeg`, `.gif` or `.webp` reference in your prompt is
+auto-attached for vision-capable models. Local files (absolute, relative, or
+with `~`) are sent as base64; http(s) URLs are passed through; `/paste`
+(macOS) grabs the clipboard image. Limits: max 8 images per prompt, 10 MB
+per local file.
 
 ## Security warning (YOLO mode)
 
-This agent is intentionally minimal and does **not** ask for confirmation
-before modifying files or running shell commands. The workspace sandbox
-protects `read_file`/`list_files`/`edit_file` hard against traversal;
-`execute_bash` is `cwd`-pinned but could in theory escape the workspace via
-absolute paths (`cat /etc/hosts`) or an explicit `cd /tmp`.
+This agent does **not** ask for confirmation before editing files or running
+shell commands. Before letting friends loose on it:
 
-**Recommendations:**
-
-- Always start the CLI from a test repo, not from your home directory.
-- Do not leave sensitive sessions open (SSH agent, password manager) while the
-  agent is running.
-- `fetch_url` follows redirects and accepts any public http(s) URL. It does not
-  know which hosts are "internal" — it could in theory reach
-  `http://localhost:…` or intranet URLs. Don't run the agent on machines with
-  sensitive internal services unless you're comfortable with that.
-- Image attachments intentionally bypass the workspace sandbox so that
-  screenshots from `~/Desktop` or similar can be used. Only the referenced
-  file is read and base64-encoded — no shell or write access — but a mistyped
-  path elsewhere on disk will still leak that file's contents to OpenRouter.
-- For real sandboxing, wrap it in a container (Docker) or `bwrap`.
-
-## Scripts
-
-| Script              | What it does                                      |
-| ------------------- | ------------------------------------------------- |
-| `npm run dev`       | Run the CLI against the blackbox repo itself      |
-| `npm run typecheck` | `tsc --noEmit`                                    |
-| `npm run link`      | Register the global `blackbox` command (npm link) |
-| `npm run unlink`    | Remove the global `blackbox` command              |
+- Run it from a throwaway repo, not `~` or a production checkout.
+- `read_file` / `list_files` / `edit_file` are hard-sandboxed, but
+  `execute_bash` can still touch absolute paths (`cat /etc/hosts`, `cd /tmp`).
+- `fetch_url` accepts any public URL, including `http://localhost:…` and
+  intranet hosts.
+- Image attachments bypass the sandbox so `~/Desktop/shot.png` works — a
+  mistyped path will still ship that file to OpenRouter.
+- For real isolation, wrap it in Docker or `bwrap`.
