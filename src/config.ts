@@ -16,10 +16,6 @@ export const DEFAULT_MODEL = "google/gemini-3-flash-preview";
 // All entries below support both tool/function calling and image inputs
 // (modalities: text+image -> text, supported_parameters: tools).
 export const CURATED_MODELS: string[] = [
-  "openrouter/elephant-alpha",
-  "z-ai/glm-4.5-air:free",
-  "nvidia/nemotron-3-super-120b-a12b:free",
-
   // Anthropic — top coding / agent models
   "anthropic/claude-opus-4.7",
   "anthropic/claude-opus-4.6",
@@ -50,6 +46,11 @@ export const CURATED_MODELS: string[] = [
 
   // Mistral
   "mistralai/mistral-large-2512",
+
+  // Free models
+  "openrouter/elephant-alpha",
+  "z-ai/glm-4.5-air:free",
+  "nvidia/nemotron-3-super-120b-a12b:free",
 ];
 
 export const VISION_HINTS: RegExp[] = [

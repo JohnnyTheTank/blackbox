@@ -45,8 +45,8 @@ Requires Node.js >= 20.12.
 | `/paste [text]`     | Attach the macOS clipboard image (optional text)     |
 | `/plan`             | Enter plan mode (read-only, produces markdown plans) |
 | `/agent`            | Leave plan mode, back to the default agent mode      |
-| `/plans`            | List open plans in `.blackbox/plans/`                |
-| `/plans all`        | List open and done plans                             |
+| `/plans`            | List + pick open plans (↑↓ + Enter to open)          |
+| `/plans all`        | List + pick open and done plans                      |
 | `/plan done <slug>` | Mark a plan as done (renames to `*.plan.done.md`)    |
 | `/reset`            | Clear the chat history (keeps current mode)          |
 | `/exit` / `exit`    | Quit (also Ctrl-C)                                   |
@@ -103,9 +103,11 @@ Marked plan done: .blackbox/plans/dark-mode-toggle.plan.md → .blackbox/plans/d
 - Plan bodies are written in English by default. Ask explicitly (e.g.
   "schreib den Plan auf Deutsch") to get another language; clarifying
   questions still follow your own language.
-- `/plans` lists only open plans; done ones are hidden. `/plans all` shows
-  both. `/plan done <slug>` renames a plan to `<slug>.plan.done.md` so it
-  disappears from `/plans` but stays in git history.
+- `/plans` lists only open plans and lets you pick one with ↑↓ + Enter to
+  print its content in the terminal; done plans are hidden. `/plans all`
+  includes done plans in the picker. `/plan done <slug>` renames a plan to
+  `<slug>.plan.done.md` so it disappears from `/plans` but stays in git
+  history.
 
 ## Images
 

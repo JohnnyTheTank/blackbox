@@ -287,8 +287,8 @@ function printHelp(): void {
       "  /tool <n>            Show full args and result for tool call #n",
       "  /plan                Switch to plan mode (read-only, writes .blackbox/plans/*.plan.md)",
       "  /agent               Switch back to agent mode (default, can edit files)",
-      "  /plans               List open plans in .blackbox/plans/",
-      "  /plans all           List open and done plans",
+      "  /plans               List + pick open plans in .blackbox/plans/ (↑↓ + Enter to open)",
+      "  /plans all           List + pick open and done plans",
       "  /plan done <slug>    Mark a plan as done (renames to .plan.done.md)",
       "  /reset               Clear the chat history (keeps current mode)",
       "  /exit, exit          Quit (also Ctrl-C)",
@@ -457,6 +457,51 @@ async function listPlans(): Promise<PlanEntry[]> {
   }
   results.sort((a, b) => b.mtimeMs - a.mtimeMs);
   return results;
+}
+
+async function printPlanContent(entry: PlanEntry): Promise<void> {
+  const fsMod = await import("node:fs/promises");
+  let content: string;
+  try {
+    content = await fsMod.readFile(entry.absPath, "utf8");
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.log(C.red(`Failed to read ${entry.relPath}: ${msg}`));
+    return;
+  }
+  const marker = entry.done ? C.dim(" [done]") : "";
+  console.log("");
+  console.log(C.bold(`${entry.slug}${marker}`) + "  " + C.dim(entry.relPath));
+  console.log(C.dim("─".repeat(Math.min(72, (process.stdout.columns ?? 72)))));
+  console.log(content.replace(/\s+$/u, ""));
+  console.log("");
+}
+
+async function pickPlan(
+  plans: PlanEntry[],
+  rl: readline.Interface,
+  showAll: boolean,
+): Promise<PlanEntry | undefined> {
+  rl.pause();
+  try {
+    const options: SelectOption<number>[] = plans.map((p, i) => ({
+      label: p.slug,
+      hint: p.done ? "done" : p.relPath,
+      value: i,
+    }));
+    const picked = await selectFromList<number>({
+      title: showAll
+        ? `Select a plan (${plans.length} total):`
+        : `Select a plan (${plans.length} open):`,
+      options,
+      pageSize: Math.min(12, plans.length),
+      helpHint: "  ↑↓ move · Enter open · Esc cancel",
+    });
+    if (picked === undefined) return undefined;
+    return plans[picked];
+  } finally {
+    rl.resume();
+  }
 }
 
 async function printPlans(showAll: boolean): Promise<void> {
@@ -744,13 +789,22 @@ async function main(): Promise<void> {
       continue;
     }
 
-    if (entry === "/plans") {
-      await printPlans(false);
-      continue;
-    }
-
-    if (entry === "/plans all") {
-      await printPlans(true);
+    if (entry === "/plans" || entry === "/plans all") {
+      const showAll = entry === "/plans all";
+      const all = await listPlans();
+      const filtered = showAll ? all : all.filter((p) => !p.done);
+      const tty = Boolean(process.stdout.isTTY) && Boolean(process.stdin.isTTY);
+      if (filtered.length === 0 || !tty) {
+        await printPlans(showAll);
+        continue;
+      }
+      await printPlans(showAll);
+      const picked = await pickPlan(filtered, rl, showAll);
+      if (picked) {
+        await printPlanContent(picked);
+      } else {
+        console.log(C.dim("  (no plan opened)\n"));
+      }
       continue;
     }
 
