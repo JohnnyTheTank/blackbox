@@ -18,7 +18,7 @@ Inspired by the video _"How does Claude Code actually work?"_ — a simple
 
 ## Setup
 
-Requirement: Node.js >= 20.
+Requirement: Node.js >= 20.12 (`process.loadEnvFile` is used internally).
 
 ```bash
 cp .env.example .env
@@ -26,20 +26,52 @@ cp .env.example .env
 npm install
 ```
 
-## Run
+## Use it in any project
+
+The CLI uses **the directory it is started from** as its sandbox root, so the
+typical flow is: install once, then `cd` into any project and run `blackbox`.
+
+### Option A — global command via `npm link` (recommended)
+
+From the blackbox repo:
 
 ```bash
-npm run dev
+npm link       # creates a global 'blackbox' command
 ```
 
-With an explicit model:
+Then, from any project folder:
 
 ```bash
+cd ~/code/some-other-project
+blackbox
+# or: blackbox --model openai/gpt-5
+```
+
+To uninstall:
+
+```bash
+npm run unlink
+```
+
+### Option B — run from the repo without linking
+
+```bash
+cd ~/code/some-other-project
+/path/to/blackbox/bin/blackbox.mjs
+```
+
+Or inside the blackbox repo itself:
+
+```bash
+npm run dev                 # operates on the blackbox repo as workspace
 npm run dev -- --model openai/gpt-5
 ```
 
-The CLI uses **the directory it is started from** as its sandbox root. Launch
-it from the project folder you want the agent to work on.
+### How `.env` is resolved
+
+The API key is always loaded from the `.env` **inside the blackbox install
+directory** (not from the target project). You configure the key once and can
+then use `blackbox` in any project without exposing the key to it.
 
 ## Slash commands
 

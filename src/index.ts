@@ -1,6 +1,19 @@
 #!/usr/bin/env -S npx tsx
 import * as readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+import { existsSync } from "node:fs";
+
+const INSTALL_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
+const envPath = join(INSTALL_DIR, ".env");
+if (existsSync(envPath) && typeof process.loadEnvFile === "function") {
+  try {
+    process.loadEnvFile(envPath);
+  } catch {
+    // ignore malformed .env
+  }
+}
 
 import { runAgent, buildInitialHistory } from "./agent.ts";
 import { WORKSPACE_ROOT } from "./sandbox.ts";

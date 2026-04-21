@@ -5,11 +5,13 @@
   "description": "Minimal CLI coding agent using OpenRouter tool calling",
   "type": "module",
   "bin": {
-    "blackbox": "src/index.ts"
+    "blackbox": "bin/blackbox.mjs"
   },
   "scripts": {
-    "dev": "tsx --env-file=.env src/index.ts",
-    "start": "tsx --env-file=.env src/index.ts",
+    "dev": "tsx src/index.ts",
+    "start": "tsx src/index.ts",
+    "link": "npm link",
+    "unlink": "npm unlink -g blackbox",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
