@@ -1,7 +1,6 @@
 # blackbox
 
-A minimal CLI coding agent in TypeScript that talks to tool-calling-capable
-LLMs via the [OpenRouter](https://openrouter.ai) API. 
+Simple CLI coding agent in TypeScript that uses tool-calling-capable LLMs via the [OpenRouter](https://openrouter.ai) API. 
 
 ## Quickstart
 
