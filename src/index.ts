@@ -78,7 +78,12 @@ import {
   VISION_HINTS,
   WORKSPACE_ROOT,
 } from "./config.ts";
-import { AGENT_TOOL_SCHEMAS, PLAN_TOOL_SCHEMAS, sanitizePlanSlug } from "./tools.ts";
+import {
+  AGENT_TOOL_SCHEMAS,
+  PLAN_TOOL_SCHEMAS,
+  sanitizePlanSlug,
+  setSubagentFallbackModel,
+} from "./tools.ts";
 import {
   parseImages,
   dumpClipboardImage,
@@ -86,6 +91,20 @@ import {
   type ParsedImage,
 } from "./images.ts";
 import { selectFromList, type SelectOption } from "./select.ts";
+import {
+  countRunning,
+  formatRuntime,
+  killAll,
+  killJob,
+  listJobs,
+  readJobLog,
+  type JobSummary,
+} from "./jobs.ts";
+import {
+  AGENTS_DIRS,
+  getAgentRegistry,
+  listAgents,
+} from "./subagents.ts";
 
 type Mode = "agent" | "plan";
 
@@ -287,9 +306,14 @@ function printHelp(): void {
       "  /tool <n>            Show full args and result for tool call #n",
       "  /plan                Switch to plan mode (read-only, writes .blackbox/plans/*.plan.md)",
       "  /agent               Switch back to agent mode (default, can edit files)",
-      "  /plans               List + pick open plans in .blackbox/plans/ (↑↓ + Enter to open)",
-      "  /plans all           List + pick open and done plans",
+      "  /plans               Pick an open plan → View / Refine / Execute",
+      "  /plans all           Same as /plans, but includes done plans",
       "  /plan done <slug>    Mark a plan as done (renames to .plan.done.md)",
+      "  /jobs                List background jobs (shell + subagents); interactive picker",
+      "  /jobs kill <id>      Kill a running job (SIGTERM → SIGKILL)",
+      "  /jobs log <id>       Tail the log of a job",
+      "  /agents              List available subagent definitions (.blackbox/agents/*.md)",
+      "  /agents reload       Re-read subagent markdown files from disk",
       "  /reset               Clear the chat history (keeps current mode)",
       "  /exit, exit          Quit (also Ctrl-C)",
       "",
@@ -504,6 +528,52 @@ async function pickPlan(
   }
 }
 
+type PlanAction = "view" | "refine" | "execute";
+
+async function pickPlanAction(
+  entry: PlanEntry,
+  rl: readline.Interface,
+): Promise<PlanAction | undefined> {
+  const isTTY = Boolean(process.stdout.isTTY) && Boolean(process.stdin.isTTY);
+  if (!isTTY) return undefined;
+  if (entry.done) {
+    console.log(
+      C.yellow(
+        `  Note: "${entry.slug}" is marked done — refining or executing it will reopen work on it.`,
+      ),
+    );
+  }
+  rl.pause();
+  try {
+    const options: SelectOption<PlanAction>[] = [
+      {
+        label: "View only",
+        hint: "just show the content (already printed above)",
+        value: "view",
+      },
+      {
+        label: "Refine via prompting",
+        hint: "switch to plan mode and iterate on this plan",
+        value: "refine",
+      },
+      {
+        label: "Execute the plan",
+        hint: "switch to agent mode and implement the steps",
+        value: "execute",
+      },
+    ];
+    const picked = await selectFromList<PlanAction>({
+      title: `What do you want to do with "${entry.slug}"?`,
+      options,
+      pageSize: options.length,
+      helpHint: "  ↑↓ move · Enter select · Esc cancel",
+    });
+    return picked;
+  } finally {
+    rl.resume();
+  }
+}
+
 async function printPlans(showAll: boolean): Promise<void> {
   const all = await listPlans();
   const plans = showAll ? all : all.filter((p) => !p.done);
@@ -606,6 +676,102 @@ async function markPlanDone(rawTarget: string): Promise<void> {
   }
 }
 
+function printJobsList(): JobSummary[] {
+  const jobs = listJobs();
+  console.log("");
+  if (jobs.length === 0) {
+    console.log(C.dim("No background jobs yet."));
+    console.log("");
+    return jobs;
+  }
+  console.log(C.bold(`Jobs (${jobs.length}):`));
+  for (const j of jobs) {
+    const statusColor =
+      j.status === "running"
+        ? C.yellow
+        : j.status === "done"
+          ? C.green
+          : j.status === "error"
+            ? C.red
+            : C.dim;
+    const exit =
+      j.exitCode !== undefined && j.exitCode !== null
+        ? ` exit=${j.exitCode}`
+        : "";
+    console.log(
+      `  ${j.id.padEnd(6)} ${j.kind.padEnd(8)} ${statusColor(j.status.padEnd(9))} ${formatRuntime(j.runtimeMs).padStart(8)}${exit}  ${C.dim(j.label)}`,
+    );
+  }
+  console.log("");
+  return jobs;
+}
+
+function printJobLog(jobId: string): void {
+  const log = readJobLog(jobId);
+  console.log("");
+  console.log(log);
+  console.log("");
+}
+
+async function pickJob(
+  jobs: JobSummary[],
+  rl: readline.Interface,
+): Promise<JobSummary | undefined> {
+  const isTTY = Boolean(process.stdout.isTTY) && Boolean(process.stdin.isTTY);
+  if (!isTTY || jobs.length === 0) return undefined;
+  rl.pause();
+  try {
+    const options: SelectOption<number>[] = jobs.map((j, i) => ({
+      label: `${j.id} ${j.kind} ${j.status}`,
+      hint: `${formatRuntime(j.runtimeMs)}  ${j.label.slice(0, 60)}`,
+      value: i,
+    }));
+    const picked = await selectFromList<number>({
+      title: `Select job (${jobs.length}):`,
+      options,
+      pageSize: Math.min(12, jobs.length),
+      helpHint: "  ↑↓ move · Enter show log · Esc cancel",
+    });
+    if (picked === undefined) return undefined;
+    return jobs[picked];
+  } finally {
+    rl.resume();
+  }
+}
+
+function printAgents(): void {
+  const reg = getAgentRegistry();
+  const agents = listAgents();
+  console.log("");
+  if (agents.length === 0) {
+    console.log(
+      C.dim(
+        `No subagents configured. Drop markdown files into:\n  ${AGENTS_DIRS.project}\n  ${AGENTS_DIRS.user}`,
+      ),
+    );
+  } else {
+    console.log(C.bold(`Subagents (${agents.length}):`));
+    for (const a of agents) {
+      const toolInfo =
+        a.tools === null ? "all tools" : `tools: ${a.tools.join(", ") || "(none)"}`;
+      const modelInfo = a.model ?? "(inherits main model)";
+      const desc = a.description.length > 0 ? ` — ${a.description}` : "";
+      console.log(`  ${C.bold(a.name)}${C.dim(desc)}`);
+      console.log(C.dim(`    model: ${modelInfo}`));
+      console.log(C.dim(`    ${toolInfo}`));
+      console.log(C.dim(`    source: ${a.source}`));
+    }
+  }
+  if (reg.errors.length > 0) {
+    console.log("");
+    console.log(C.yellow("Load errors:"));
+    for (const e of reg.errors) {
+      console.log(C.yellow(`  - ${e}`));
+    }
+  }
+  console.log("");
+}
+
 function makeAskUser(
   rl: readline.Interface,
   spinner: Spinner,
@@ -673,9 +839,24 @@ async function main(): Promise<void> {
     if (picked) model = picked;
   }
   persistModel(model);
+  setSubagentFallbackModel(model);
+
+  const agentRegistryAtStart = getAgentRegistry();
 
   console.log(C.dim(`  Model:     ${model}`));
   console.log(C.dim(`  Mode:      ${mode} (use /plan or /agent to switch)`));
+  if (agentRegistryAtStart.agents.size > 0) {
+    console.log(
+      C.dim(
+        `  Subagents: ${agentRegistryAtStart.agents.size} loaded (use /agents to list)`,
+      ),
+    );
+  }
+  if (agentRegistryAtStart.errors.length > 0) {
+    for (const err of agentRegistryAtStart.errors) {
+      console.log(C.yellow(`  subagent load error: ${err}`));
+    }
+  }
   console.log(
     C.dim("  Tip: /help for commands, Ctrl-C cancels a run or exits when idle."),
   );
@@ -704,6 +885,16 @@ async function main(): Promise<void> {
     }
   };
 
+  const shutdownJobs = (): void => {
+    const running = countRunning();
+    if (running > 0) {
+      console.log(
+        C.dim(`  terminating ${running} background job${running === 1 ? "" : "s"}…`),
+      );
+      killAll();
+    }
+  };
+
   rl.on("SIGINT", () => {
     if (currentAbort && !currentAbort.signal.aborted) {
       currentAbort.abort();
@@ -713,6 +904,7 @@ async function main(): Promise<void> {
     }
     if (pendingExitConfirm) {
       console.log("\n" + C.dim("Bye."));
+      shutdownJobs();
       rl.close();
       process.exit(0);
     }
@@ -721,13 +913,84 @@ async function main(): Promise<void> {
       pendingExitConfirm = false;
       exitConfirmTimer = null;
     }, 2000);
+    const runningHint =
+      countRunning() > 0
+        ? C.yellow(`Press Ctrl-C again within 2s to exit (will kill ${countRunning()} job${countRunning() === 1 ? "" : "s"}).`)
+        : C.yellow("Press Ctrl-C again within 2s to exit.");
     process.stdout.write(
       "\r\x1b[2K" +
-      C.yellow("Press Ctrl-C again within 2s to exit.") +
+      runningHint +
       "\n" +
       promptPrefix(),
     );
   });
+
+  const runOneTurn = async (userContent: UserContent): Promise<void> => {
+    const reporter: AgentReporter = {
+      onToolCall: (name, args) => {
+        spinner.log(formatToolCallLine(name, args));
+      },
+      onToolResult: (_name, result) => {
+        spinner.log(formatToolPreviewBlock(result));
+      },
+    };
+
+    const abort = new AbortController();
+    currentAbort = abort;
+    const historyBefore = history.length;
+    clearExitConfirm();
+
+    const runOptions: RunAgentOptions =
+      mode === "plan"
+        ? {
+          toolSchemas: PLAN_TOOL_SCHEMAS,
+          askUser: makeAskUser(rl, spinner),
+        }
+        : { toolSchemas: AGENT_TOOL_SCHEMAS };
+
+    const runningBg = countRunning();
+    const spinnerLabel =
+      runningBg > 0
+        ? `working… (${runningBg} bg job${runningBg === 1 ? "" : "s"})`
+        : "working…";
+    spinner.start(spinnerLabel);
+    try {
+      const { answer, toolCalls } = await runAgent(
+        history,
+        userContent,
+        model,
+        reporter,
+        abort.signal,
+        runOptions,
+      );
+      spinner.stop();
+      lastToolCalls = toolCalls;
+      console.log("");
+      console.log(answer && answer.length > 0 ? answer : C.dim("(empty response)"));
+      if (toolCalls.length > 0) {
+        console.log(
+          C.dim(
+            `\n  (${toolCalls.length} tool call${toolCalls.length === 1 ? "" : "s"
+            } — /tools to list, /tool <n> for details)`,
+          ),
+        );
+      }
+      console.log("");
+    } catch (err) {
+      spinner.stop();
+      if (abort.signal.aborted) {
+        history.length = historyBefore;
+        console.log("");
+        console.log(C.yellow("Cancelled.") + "\n");
+      } else {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.log(C.red(`\nError: ${msg}\n`));
+      }
+    } finally {
+      currentAbort = null;
+      clearExitConfirm();
+    }
+  };
 
   while (true) {
     let line: string;
@@ -741,6 +1004,7 @@ async function main(): Promise<void> {
     if (entry.length === 0) continue;
 
     if (entry === "exit" || entry === "/exit" || entry === "quit") {
+      shutdownJobs();
       break;
     }
 
@@ -800,10 +1064,64 @@ async function main(): Promise<void> {
       }
       await printPlans(showAll);
       const picked = await pickPlan(filtered, rl, showAll);
-      if (picked) {
-        await printPlanContent(picked);
-      } else {
+      if (!picked) {
         console.log(C.dim("  (no plan opened)\n"));
+        continue;
+      }
+      await printPlanContent(picked);
+      const action = await pickPlanAction(picked, rl);
+      if (!action || action === "view") continue;
+
+      if (action === "refine") {
+        const fsMod = await import("node:fs/promises");
+        let planContent: string;
+        try {
+          planContent = await fsMod.readFile(picked.absPath, "utf8");
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.log(C.red(`Failed to re-read ${picked.relPath}: ${msg}`));
+          continue;
+        }
+        if (mode !== "plan") {
+          mode = "plan";
+          history = buildInitialHistory(PLAN_SYSTEM_PROMPT);
+          lastToolCalls = [];
+        } else {
+          history = buildInitialHistory(PLAN_SYSTEM_PROMPT);
+          lastToolCalls = [];
+        }
+        console.log(
+          C.magenta("Plan mode active.") +
+          C.dim(` Refining ${picked.slug}.`),
+        );
+        const seed =
+          `I want to refine the plan \`${picked.slug}\` at ${picked.relPath}.\n\n` +
+          `Current content:\n\n${planContent.replace(/\s+$/u, "")}\n\n` +
+          `Ask me one concrete question via ask_user about what I want to change, then update the file using write_plan with the same slug "${picked.slug}". Do not call write_plan until you have my answer.`;
+        await runOneTurn(seed);
+        continue;
+      }
+
+      if (action === "execute") {
+        if (mode !== "agent") {
+          mode = "agent";
+          history = buildInitialHistory(SYSTEM_PROMPT);
+          lastToolCalls = [];
+        } else {
+          history = buildInitialHistory(SYSTEM_PROMPT);
+          lastToolCalls = [];
+        }
+        console.log(
+          C.green("Agent mode active.") +
+          C.dim(` Executing ${picked.slug}.`),
+        );
+        const seed =
+          `Implement the plan at ${picked.relPath} (slug: ${picked.slug}). ` +
+          `First read it with read_file, then execute the Steps section end-to-end. ` +
+          `If something is ambiguous, stop and ask instead of guessing. ` +
+          `Do not mark the plan as done; the user will do that afterwards.`;
+        await runOneTurn(seed);
+        continue;
       }
       continue;
     }
@@ -812,6 +1130,53 @@ async function main(): Promise<void> {
       const rest =
         entry === "/plan done" ? "" : entry.slice("/plan done ".length).trim();
       await markPlanDone(rest);
+      continue;
+    }
+
+    if (entry === "/jobs") {
+      const jobs = printJobsList();
+      if (jobs.length > 0) {
+        const picked = await pickJob(jobs, rl);
+        if (picked) printJobLog(picked.id);
+      }
+      continue;
+    }
+
+    if (entry.startsWith("/jobs kill")) {
+      const rest =
+        entry === "/jobs kill" ? "" : entry.slice("/jobs kill ".length).trim();
+      if (rest.length === 0) {
+        console.log(C.red("/jobs kill: job id required. Usage: /jobs kill <id>"));
+      } else {
+        console.log(killJob(rest));
+      }
+      continue;
+    }
+
+    if (entry.startsWith("/jobs log")) {
+      const rest =
+        entry === "/jobs log" ? "" : entry.slice("/jobs log ".length).trim();
+      if (rest.length === 0) {
+        console.log(C.red("/jobs log: job id required. Usage: /jobs log <id>"));
+      } else {
+        printJobLog(rest);
+      }
+      continue;
+    }
+
+    if (entry === "/agents") {
+      printAgents();
+      continue;
+    }
+
+    if (entry === "/agents reload") {
+      const reg = getAgentRegistry(true);
+      console.log(
+        C.green(
+          `Reloaded subagents: ${reg.agents.size} loaded${reg.errors.length > 0 ? `, ${reg.errors.length} error(s)` : ""}.`,
+        ),
+      );
+      for (const e of reg.errors) console.log(C.yellow(`  - ${e}`));
       continue;
     }
 
@@ -844,6 +1209,7 @@ async function main(): Promise<void> {
       if (picked && picked !== model) {
         model = picked;
         persistModel(model);
+        setSubagentFallbackModel(model);
         console.log(C.green(`Switched model to: ${model}\n`));
       } else if (picked === model) {
         console.log(C.dim(`  Model unchanged: ${model}\n`));
@@ -867,6 +1233,7 @@ async function main(): Promise<void> {
       } else {
         model = newModel;
         persistModel(model);
+        setSubagentFallbackModel(model);
         console.log(C.green(`Switched model to: ${model}`));
       }
       continue;
@@ -913,66 +1280,7 @@ async function main(): Promise<void> {
     if (images.length === 0 && finalText.length === 0) continue;
 
     const userContent = buildUserContent(finalText, images);
-
-    const reporter: AgentReporter = {
-      onToolCall: (name, args) => {
-        spinner.log(formatToolCallLine(name, args));
-      },
-      onToolResult: (_name, result) => {
-        spinner.log(formatToolPreviewBlock(result));
-      },
-    };
-
-    const abort = new AbortController();
-    currentAbort = abort;
-    const historyBefore = history.length;
-    clearExitConfirm();
-
-    const runOptions: RunAgentOptions =
-      mode === "plan"
-        ? {
-          toolSchemas: PLAN_TOOL_SCHEMAS,
-          askUser: makeAskUser(rl, spinner),
-        }
-        : { toolSchemas: AGENT_TOOL_SCHEMAS };
-
-    spinner.start("working…");
-    try {
-      const { answer, toolCalls } = await runAgent(
-        history,
-        userContent,
-        model,
-        reporter,
-        abort.signal,
-        runOptions,
-      );
-      spinner.stop();
-      lastToolCalls = toolCalls;
-      console.log("");
-      console.log(answer && answer.length > 0 ? answer : C.dim("(empty response)"));
-      if (toolCalls.length > 0) {
-        console.log(
-          C.dim(
-            `\n  (${toolCalls.length} tool call${toolCalls.length === 1 ? "" : "s"
-            } — /tools to list, /tool <n> for details)`,
-          ),
-        );
-      }
-      console.log("");
-    } catch (err) {
-      spinner.stop();
-      if (abort.signal.aborted) {
-        history.length = historyBefore;
-        console.log("");
-        console.log(C.yellow("Cancelled.") + "\n");
-      } else {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.log(C.red(`\nError: ${msg}\n`));
-      }
-    } finally {
-      currentAbort = null;
-      clearExitConfirm();
-    }
+    await runOneTurn(userContent);
   }
 
   rl.close();

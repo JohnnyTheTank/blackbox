@@ -50,6 +50,7 @@ export type AskUserHandler = (
 export type RunAgentOptions = {
   toolSchemas?: AnyTool[];
   askUser?: AskUserHandler;
+  allowedTools?: Set<string>;
 };
 
 function createClient(): OpenAI {
@@ -112,6 +113,7 @@ export async function runAgent(
   const toolCalls: ToolCallRecord[] = [];
   const toolSchemas = options?.toolSchemas ?? AGENT_TOOL_SCHEMAS;
   const askUser = options?.askUser;
+  const allowedTools = options?.allowedTools;
 
   history.push({ role: "user", content: userContent });
 
@@ -158,6 +160,8 @@ export async function runAgent(
       let result: string;
       if (parseError) {
         result = `Failed to parse tool arguments: ${parseError}`;
+      } else if (allowedTools && !allowedTools.has(name)) {
+        result = `Error: tool '${name}' is not allowed in this context.`;
       } else if (name === "ask_user") {
         if (!askUser) {
           result =

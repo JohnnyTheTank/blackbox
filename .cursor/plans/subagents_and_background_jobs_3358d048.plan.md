@@ -4,31 +4,31 @@ overview: "blackbox um zwei Job-Arten erweitern, die den Main-Agent nicht blocki
 todos:
   - id: jobs-core
     content: "`src/jobs.ts`: JobRegistry mit Shell-Spawner, Log-Streaming in tmpdir, listJobs/readJobLog/killJob/killAll, process-group-kill wie in bestehender executeBashTool"
-    status: pending
+    status: completed
   - id: agent-whitelist
     content: "`src/agent.ts`: optionaler `allowedTools?: Set<string>` Param in runAgent, filtert TOOL_SCHEMAS und blockt nicht-gewhitelistete Tool-Calls"
-    status: pending
+    status: completed
   - id: subagents-loader
     content: "`src/subagents.ts`: Markdown+YAML-Frontmatter-Parser (manuell, kein neues dep), Laden aus `.blackbox/agents/` und `~/.blackbox/agents/`, Tool-Whitelist gegen TOOL_REGISTRY validieren"
-    status: pending
+    status: completed
   - id: subagents-runner
     content: "`src/subagents.ts`: spawnSubagentJob() startet runAgent als detached Promise, Reporter schreibt in Job-Log, Result/Error landen in JobRecord"
-    status: pending
+    status: completed
   - id: tools-register
     content: "`src/tools.ts`: sieben neue Tool-Schemas + Handler (spawn_background, spawn_subagent, list_jobs, list_subagents, read_job_log, subagent_result, kill_job) und im TOOL_REGISTRY eintragen"
-    status: pending
+    status: completed
   - id: system-prompt
     content: "`src/config.ts`: SYSTEM_PROMPT um die neuen Tools + Hinweis 'nutze spawn_background statt execute_bash für Dev-Server' erweitern"
-    status: pending
+    status: completed
   - id: cli-integration
     content: "`src/index.ts`: Exit-Hook für jobs.killAll(), `/jobs` (+ `/jobs kill <id>`) und `/agents` Slash-Commands, optional Spinner-Label mit Anzahl laufender Jobs"
-    status: pending
+    status: completed
   - id: example-agents
     content: "`examples/agents/{scout,planner,worker}.md` als Starter-Templates anlegen"
-    status: pending
+    status: completed
   - id: readme
     content: "README.md: neue Sektionen 'Background Jobs' und 'Subagents' (Markdown-Format, Pfade, Beispiele) + Slash-Commands-Tabelle ergänzen"
-    status: pending
+    status: completed
 isProject: false
 ---
 

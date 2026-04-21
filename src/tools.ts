@@ -5,6 +5,13 @@ import type OpenAI from "openai";
 
 import { assertInside, relToWorkspace } from "./sandbox.ts";
 import {
+  formatRuntime,
+  killJob,
+  listJobs,
+  readJobLog,
+  spawnShellJob,
+} from "./jobs.ts";
+import {
   BASH_MAX_BUFFER_BYTES,
   BASH_TIMEOUT_MS,
   FETCH_DEFAULT_MAX_BYTES,
@@ -398,6 +405,113 @@ async function executeBashTool(
   });
 }
 
+async function spawnBackgroundTool(args: {
+  command: string;
+}): Promise<string> {
+  if (typeof args.command !== "string" || args.command.trim().length === 0) {
+    throw new Error("spawn_background requires a non-empty 'command' string");
+  }
+  const job = spawnShellJob(args.command);
+  return `Started shell job ${job.id} for: ${args.command}\nUse read_job_log('${job.id}') to inspect output, kill_job('${job.id}') to stop.`;
+}
+
+async function listJobsTool(): Promise<string> {
+  const jobs = listJobs();
+  if (jobs.length === 0) return "(no jobs)";
+  const rows = jobs.map((j) => {
+    const runtime = formatRuntime(j.runtimeMs);
+    const exit =
+      j.exitCode !== undefined && j.exitCode !== null
+        ? ` exit=${j.exitCode}`
+        : "";
+    return `${j.id}  ${j.kind.padEnd(8)}  ${j.status.padEnd(9)}  ${runtime.padStart(8)}${exit}  ${j.label}`;
+  });
+  const header = `id     kind      status     runtime   label`;
+  return `${header}\n${"-".repeat(header.length)}\n${rows.join("\n")}`;
+}
+
+async function readJobLogTool(args: {
+  job_id: string;
+  tail?: number;
+}): Promise<string> {
+  if (typeof args.job_id !== "string" || args.job_id.length === 0) {
+    throw new Error("read_job_log requires a 'job_id' string");
+  }
+  return truncate(readJobLog(args.job_id, args.tail));
+}
+
+async function killJobTool(args: { job_id: string }): Promise<string> {
+  if (typeof args.job_id !== "string" || args.job_id.length === 0) {
+    throw new Error("kill_job requires a 'job_id' string");
+  }
+  return killJob(args.job_id);
+}
+
+async function listSubagentsTool(): Promise<string> {
+  const { listAgentsForDisplay, getAgentRegistry } = await import(
+    "./subagents.ts"
+  );
+  const reg = getAgentRegistry();
+  const errBlock =
+    reg.errors.length > 0
+      ? `\n\nload errors:\n${reg.errors.map((e) => `  - ${e}`).join("\n")}`
+      : "";
+  return listAgentsForDisplay() + errBlock;
+}
+
+let subagentFallbackModel = "";
+
+export function setSubagentFallbackModel(model: string): void {
+  subagentFallbackModel = model;
+}
+
+async function spawnSubagentTool(args: {
+  agent: string;
+  task: string;
+}): Promise<string> {
+  if (typeof args.agent !== "string" || args.agent.length === 0) {
+    throw new Error("spawn_subagent requires an 'agent' name");
+  }
+  if (typeof args.task !== "string" || args.task.trim().length === 0) {
+    throw new Error("spawn_subagent requires a non-empty 'task' string");
+  }
+  if (!subagentFallbackModel) {
+    return "Error: subagent fallback model is not configured. This is an internal bug.";
+  }
+  const { spawnSubagentJob } = await import("./subagents.ts");
+  const result = spawnSubagentJob(args.agent, args.task, {
+    fallbackModel: subagentFallbackModel,
+  });
+  if ("error" in result) return result.error;
+  const { job } = result;
+  return `Started subagent job ${job.id} (agent=${args.agent}).\nUse subagent_result('${job.id}') to fetch the final answer once status='done', or read_job_log('${job.id}') to watch progress.`;
+}
+
+async function subagentResultTool(args: {
+  job_id: string;
+}): Promise<string> {
+  if (typeof args.job_id !== "string" || args.job_id.length === 0) {
+    throw new Error("subagent_result requires a 'job_id' string");
+  }
+  const { getJob, formatRuntime: fmtRuntime } = await import("./jobs.ts");
+  const job = getJob(args.job_id);
+  if (!job) return `Error: unknown job id '${args.job_id}'`;
+  if (job.kind !== "subagent") {
+    return `Error: job '${args.job_id}' is a ${job.kind} job, not a subagent. Use read_job_log instead.`;
+  }
+  const runtime = fmtRuntime((job.endedAt ?? Date.now()) - job.startedAt);
+  if (job.status === "running") {
+    return `Job ${job.id} is still running (${runtime}). Check again later or use read_job_log('${job.id}') to see progress.`;
+  }
+  if (job.status === "error") {
+    return `Job ${job.id} failed after ${runtime}: ${job.error ?? "(no error message)"}`;
+  }
+  if (job.status === "cancelled") {
+    return `Job ${job.id} was cancelled after ${runtime}.`;
+  }
+  return `Job ${job.id} done in ${runtime}.\n\n--- result ---\n${truncate(job.result ?? "(empty)")}`;
+}
+
 type ServerTool = {
   type: `openrouter:${string}`;
   parameters?: Record<string, unknown>;
@@ -528,6 +642,146 @@ const DATETIME_SCHEMA: AnyTool = {
   type: "openrouter:datetime",
 };
 
+const SPAWN_BACKGROUND_SCHEMA: AnyTool = {
+  type: "function",
+  function: {
+    name: "spawn_background",
+    description:
+      "Start a long-running shell command in the background (e.g. 'yarn dev', file watchers, servers) WITHOUT blocking the agent. Returns a job id immediately. Use read_job_log to inspect output and kill_job to stop. Prefer this over execute_bash for anything that does not terminate quickly or that you need to keep running while you continue working.",
+    parameters: {
+      type: "object",
+      properties: {
+        command: {
+          type: "string",
+          description: "The shell command to run in WORKSPACE_ROOT.",
+        },
+      },
+      required: ["command"],
+      additionalProperties: false,
+    },
+  },
+};
+
+const LIST_JOBS_SCHEMA: AnyTool = {
+  type: "function",
+  function: {
+    name: "list_jobs",
+    description:
+      "List all background shell jobs and subagent jobs in this session with id, kind, status and runtime.",
+    parameters: {
+      type: "object",
+      properties: {},
+      required: [],
+      additionalProperties: false,
+    },
+  },
+};
+
+const READ_JOB_LOG_SCHEMA: AnyTool = {
+  type: "function",
+  function: {
+    name: "read_job_log",
+    description:
+      "Read the last N lines of a job's combined stdout/stderr log (shell jobs) or trace log (subagents).",
+    parameters: {
+      type: "object",
+      properties: {
+        job_id: {
+          type: "string",
+          description: "Job id, e.g. 'sh_1' or 'sa_2'.",
+        },
+        tail: {
+          type: "integer",
+          description: "How many lines to return from the end. Default 200, max 5000.",
+          minimum: 1,
+        },
+      },
+      required: ["job_id"],
+      additionalProperties: false,
+    },
+  },
+};
+
+const KILL_JOB_SCHEMA: AnyTool = {
+  type: "function",
+  function: {
+    name: "kill_job",
+    description:
+      "Terminate a running job. Shell jobs get SIGTERM (escalates to SIGKILL after 2s). Subagents are aborted.",
+    parameters: {
+      type: "object",
+      properties: {
+        job_id: {
+          type: "string",
+          description: "Job id to terminate.",
+        },
+      },
+      required: ["job_id"],
+      additionalProperties: false,
+    },
+  },
+};
+
+const LIST_SUBAGENTS_SCHEMA: AnyTool = {
+  type: "function",
+  function: {
+    name: "list_subagents",
+    description:
+      "List available subagent definitions loaded from .blackbox/agents/*.md (project) and ~/.blackbox/agents/*.md (user). Each entry shows the agent name, description, model and allowed tools.",
+    parameters: {
+      type: "object",
+      properties: {},
+      required: [],
+      additionalProperties: false,
+    },
+  },
+};
+
+const SPAWN_SUBAGENT_SCHEMA: AnyTool = {
+  type: "function",
+  function: {
+    name: "spawn_subagent",
+    description:
+      "Start a subagent LLM run asynchronously WITHOUT blocking. Returns a job id immediately. The subagent runs with its own system prompt, model and tool whitelist as defined in its markdown file. Use list_subagents to discover available agents, subagent_result(job_id) to fetch the final answer once done, and read_job_log to watch progress.",
+    parameters: {
+      type: "object",
+      properties: {
+        agent: {
+          type: "string",
+          description: "Name of a subagent from list_subagents.",
+        },
+        task: {
+          type: "string",
+          description:
+            "The task description passed as the user message to the subagent.",
+        },
+      },
+      required: ["agent", "task"],
+      additionalProperties: false,
+    },
+  },
+};
+
+const SUBAGENT_RESULT_SCHEMA: AnyTool = {
+  type: "function",
+  function: {
+    name: "subagent_result",
+    description:
+      "Fetch the final answer of a subagent job. If the job is still running, returns a hint to retry later.",
+    parameters: {
+      type: "object",
+      properties: {
+        job_id: {
+          type: "string",
+          description: "Subagent job id (e.g. 'sa_1').",
+        },
+      },
+      required: ["job_id"],
+      additionalProperties: false,
+    },
+  },
+};
+
 const ASK_USER_SCHEMA: AnyTool = {
   type: "function",
   function: {
@@ -601,9 +855,20 @@ const READ_TOOL_SCHEMAS: AnyTool[] = [
 
 const WRITE_TOOL_SCHEMAS: AnyTool[] = [EDIT_FILE_SCHEMA, EXECUTE_BASH_SCHEMA];
 
+const JOB_TOOL_SCHEMAS: AnyTool[] = [
+  SPAWN_BACKGROUND_SCHEMA,
+  LIST_JOBS_SCHEMA,
+  READ_JOB_LOG_SCHEMA,
+  KILL_JOB_SCHEMA,
+  LIST_SUBAGENTS_SCHEMA,
+  SPAWN_SUBAGENT_SCHEMA,
+  SUBAGENT_RESULT_SCHEMA,
+];
+
 export const AGENT_TOOL_SCHEMAS: AnyTool[] = [
   ...READ_TOOL_SCHEMAS,
   ...WRITE_TOOL_SCHEMAS,
+  ...JOB_TOOL_SCHEMAS,
 ];
 
 export const PLAN_TOOL_SCHEMAS: AnyTool[] = [
@@ -630,6 +895,16 @@ export const TOOL_REGISTRY: Record<string, ToolHandler> = {
     fetchUrlTool(args as { url: string; max_bytes?: number }, signal),
   write_plan: (args) =>
     writePlanTool(args as { slug: string; title: string; content: string }),
+  spawn_background: (args) => spawnBackgroundTool(args as { command: string }),
+  list_jobs: () => listJobsTool(),
+  read_job_log: (args) =>
+    readJobLogTool(args as { job_id: string; tail?: number }),
+  kill_job: (args) => killJobTool(args as { job_id: string }),
+  list_subagents: () => listSubagentsTool(),
+  spawn_subagent: (args) =>
+    spawnSubagentTool(args as { agent: string; task: string }),
+  subagent_result: (args) =>
+    subagentResultTool(args as { job_id: string }),
 };
 
 export async function runTool(
