@@ -8,7 +8,7 @@ import type {
 
 export type UserContent = string | ChatCompletionContentPart[];
 
-import { TOOL_SCHEMAS, runTool } from "./tools.ts";
+import { AGENT_TOOL_SCHEMAS, runTool, type AnyTool } from "./tools.ts";
 import {
   MAX_ITER,
   OPENROUTER_API_KEY_ENV,
@@ -34,6 +34,22 @@ export type AgentReporter = {
 export type AgentResult = {
   answer: string;
   toolCalls: ToolCallRecord[];
+};
+
+export type AskUserRequest = {
+  question: string;
+  type: "choice" | "text";
+  options?: string[];
+};
+
+export type AskUserHandler = (
+  request: AskUserRequest,
+  signal?: AbortSignal,
+) => Promise<string>;
+
+export type RunAgentOptions = {
+  toolSchemas?: AnyTool[];
+  askUser?: AskUserHandler;
 };
 
 function createClient(): OpenAI {
@@ -90,9 +106,12 @@ export async function runAgent(
   model: string,
   reporter?: AgentReporter,
   signal?: AbortSignal,
+  options?: RunAgentOptions,
 ): Promise<AgentResult> {
   const client = getClient();
   const toolCalls: ToolCallRecord[] = [];
+  const toolSchemas = options?.toolSchemas ?? AGENT_TOOL_SCHEMAS;
+  const askUser = options?.askUser;
 
   history.push({ role: "user", content: userContent });
 
@@ -102,7 +121,7 @@ export async function runAgent(
       {
         model,
         messages: history,
-        tools: TOOL_SCHEMAS as ChatCompletionTool[],
+        tools: toolSchemas as ChatCompletionTool[],
       },
       { signal },
     );
@@ -139,6 +158,13 @@ export async function runAgent(
       let result: string;
       if (parseError) {
         result = `Failed to parse tool arguments: ${parseError}`;
+      } else if (name === "ask_user") {
+        if (!askUser) {
+          result =
+            "Error: ask_user is only available in plan mode. Do not call this tool.";
+        } else {
+          result = await runAskUser(askUser, parsedArgs, signal);
+        }
       } else {
         result = await runTool(name, parsedArgs, signal);
       }
@@ -162,6 +188,50 @@ export async function runAgent(
   };
 }
 
-export function buildInitialHistory(): ChatCompletionMessageParam[] {
-  return [{ role: "system", content: SYSTEM_PROMPT }];
+export function buildInitialHistory(
+  systemPrompt: string = SYSTEM_PROMPT,
+): ChatCompletionMessageParam[] {
+  return [{ role: "system", content: systemPrompt }];
+}
+
+async function runAskUser(
+  askUser: AskUserHandler,
+  parsedArgs: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<string> {
+  const question = typeof parsedArgs.question === "string" ? parsedArgs.question : "";
+  const type = parsedArgs.type === "choice" ? "choice" : parsedArgs.type === "text" ? "text" : null;
+  if (question.length === 0) {
+    return "Error: ask_user requires a non-empty 'question' string.";
+  }
+  if (type === null) {
+    return "Error: ask_user requires 'type' to be either 'choice' or 'text'.";
+  }
+
+  let options: string[] | undefined;
+  if (type === "choice") {
+    const raw = parsedArgs.options;
+    if (!Array.isArray(raw) || raw.length < 2) {
+      return "Error: ask_user with type='choice' needs an 'options' array with at least 2 entries.";
+    }
+    const cleaned = raw
+      .map((v) => (typeof v === "string" ? v.trim() : ""))
+      .filter((v) => v.length > 0);
+    if (cleaned.length < 2) {
+      return "Error: ask_user with type='choice' needs at least 2 non-empty option strings.";
+    }
+    options = cleaned.slice(0, 6);
+  }
+
+  try {
+    const answer = await askUser({ question, type, options }, signal);
+    const trimmed = (answer ?? "").trim();
+    if (trimmed.length === 0) {
+      return "User provided no answer (empty or cancelled). Ask again with a clearer question, or proceed with your best assumption and note the open question in the plan.";
+    }
+    return JSON.stringify({ answer: trimmed });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return `Error asking user: ${msg}`;
+  }
 }

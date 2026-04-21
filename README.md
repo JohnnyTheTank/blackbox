@@ -36,32 +36,76 @@ Requires Node.js >= 20.12.
 
 ## Slash commands
 
-| Command          | Effect                                             |
-| ---------------- | -------------------------------------------------- |
-| `/help`          | Show the help                                      |
-| `/model`         | Show the current model                             |
-| `/model <slug>`  | Switch model (e.g. `/model google/gemini-2.5-pro`) |
-| `/models`        | Curated list of common tool-capable models         |
-| `/paste [text]`  | Attach the macOS clipboard image (optional text)   |
-| `/reset`         | Clear the chat history                             |
-| `/exit` / `exit` | Quit (also Ctrl-C)                                 |
+| Command             | Effect                                               |
+| ------------------- | ---------------------------------------------------- |
+| `/help`             | Show the help                                        |
+| `/model`            | Show the current model                               |
+| `/model <slug>`     | Switch model (e.g. `/model google/gemini-2.5-pro`)   |
+| `/models`           | Curated list of common tool-capable models           |
+| `/paste [text]`     | Attach the macOS clipboard image (optional text)     |
+| `/plan`             | Enter plan mode (read-only, produces markdown plans) |
+| `/agent`            | Leave plan mode, back to the default agent mode      |
+| `/plans`            | List open plans in `.blackbox/plans/`                |
+| `/plans all`        | List open and done plans                             |
+| `/plan done <slug>` | Mark a plan as done (renames to `*.plan.done.md`)    |
+| `/reset`            | Clear the chat history (keeps current mode)          |
+| `/exit` / `exit`    | Quit (also Ctrl-C)                                   |
 
 Full list of tool-capable models:
 <https://openrouter.ai/models?supported_parameters=tools&fmt=cards&categories=programming>
 
 ## Tools
 
-| Tool                    | Purpose                                             |
-| ----------------------- | --------------------------------------------------- |
-| `read_file`             | Read a file inside the sandbox                      |
-| `list_files`            | List files/subdirs (depth 2)                        |
-| `edit_file`             | Overwrite a file inside the sandbox                 |
-| `execute_bash`          | Run a shell command (30s timeout)                   |
-| `fetch_url`             | Fetch a public http(s) URL; HTML stripped to text   |
-| `openrouter:web_search` | Real-time web search with citations (~$4 / 1k hits) |
-| `openrouter:datetime`   | Current date and time (free)                        |
+| Tool                    | Purpose                                               | Mode       |
+| ----------------------- | ----------------------------------------------------- | ---------- |
+| `read_file`             | Read a file inside the sandbox                        | both       |
+| `list_files`            | List files/subdirs (depth 2)                          | both       |
+| `edit_file`             | Overwrite a file inside the sandbox                   | agent only |
+| `execute_bash`          | Run a shell command (30s timeout)                     | agent only |
+| `fetch_url`             | Fetch a public http(s) URL; HTML stripped to text     | both       |
+| `openrouter:web_search` | Real-time web search with citations (~$4 / 1k hits)   | both       |
+| `openrouter:datetime`   | Current date and time (free)                          | both       |
+| `ask_user`              | Ask the developer a clarifying question (MC/text)     | plan only  |
+| `write_plan`            | Persist the final plan as `.blackbox/plans/*.plan.md` | plan only  |
 
 Tool results are truncated at ~8000 characters to keep context small.
+
+## Plan mode
+
+A read-only mode inspired by Cursor's plan mode. Use it when you want the
+agent to think through a change before touching any files.
+
+```text
+> /plan
+Plan mode active. Read-only; writes plans to .blackbox/plans/<slug>.plan.md.
+plan > add a dark-mode toggle to the settings screen
+? Which state layer should hold the theme preference?
+  › localStorage only
+    React context + localStorage
+    Global store (Redux/Zustand)
+...
+Wrote plan to .blackbox/plans/dark-mode-toggle.plan.md (2134 bytes)
+
+plan > /agent
+Agent mode active.
+> implement .blackbox/plans/dark-mode-toggle.plan.md
+...
+
+> /plan done dark-mode-toggle
+Marked plan done: .blackbox/plans/dark-mode-toggle.plan.md → .blackbox/plans/dark-mode-toggle.plan.done.md
+```
+
+- In plan mode, `edit_file` and `execute_bash` are disabled. The agent can
+  only read code, browse docs, ask you clarifying questions via `ask_user`,
+  and produce a single markdown plan via `write_plan`.
+- Plans always land in `.blackbox/plans/<slug>.plan.md` so you can commit
+  them to your repo as an audit trail of planned work.
+- Plan bodies are written in English by default. Ask explicitly (e.g.
+  "schreib den Plan auf Deutsch") to get another language; clarifying
+  questions still follow your own language.
+- `/plans` lists only open plans; done ones are hidden. `/plans all` shows
+  both. `/plan done <slug>` renames a plan to `<slug>.plan.done.md` so it
+  disappears from `/plans` but stays in git history.
 
 ## Images
 

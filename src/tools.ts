@@ -15,6 +15,9 @@ import {
   LIST_MAX_DEPTH,
   LIST_MAX_ENTRIES,
   LIST_SKIP,
+  PLAN_DONE_SUFFIX,
+  PLAN_FILE_SUFFIX,
+  PLANS_DIR,
   TOOL_OUTPUT_MAX_CHARS,
   WORKSPACE_ROOT,
 } from "./config.ts";
@@ -81,6 +84,68 @@ async function editFileTool(args: {
   await fs.writeFile(abs, args.content, "utf8");
   const bytes = Buffer.byteLength(args.content, "utf8");
   return `Wrote ${relToWorkspace(abs)} (${bytes} bytes)`;
+}
+
+export function sanitizePlanSlug(raw: string): string {
+  const lower = raw.toLowerCase().trim();
+  const cleaned = lower
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64);
+  return cleaned;
+}
+
+async function writePlanTool(args: {
+  slug: string;
+  title: string;
+  content: string;
+}): Promise<string> {
+  if (typeof args.slug !== "string" || args.slug.length === 0) {
+    throw new Error("write_plan requires a non-empty 'slug'");
+  }
+  if (typeof args.title !== "string" || args.title.length === 0) {
+    throw new Error("write_plan requires a non-empty 'title'");
+  }
+  if (typeof args.content !== "string" || args.content.length === 0) {
+    throw new Error("write_plan requires a non-empty 'content' (markdown body)");
+  }
+
+  const slug = sanitizePlanSlug(args.slug);
+  if (slug.length === 0) {
+    throw new Error(
+      `write_plan: slug "${args.slug}" contains no usable characters (need a-z, 0-9, '-')`,
+    );
+  }
+
+  const relPath = path.join(PLANS_DIR, `${slug}${PLAN_FILE_SUFFIX}`);
+  const abs = assertInside(relPath);
+  await fs.mkdir(path.dirname(abs), { recursive: true });
+
+  const donePath = path.join(
+    path.dirname(abs),
+    `${slug}${PLAN_DONE_SUFFIX}`,
+  );
+  let doneExisted = false;
+  try {
+    await fs.access(donePath);
+    doneExisted = true;
+  } catch {
+    // not done yet, fine
+  }
+
+  const trimmed = args.content.replace(/^\s+|\s+$/g, "");
+  const firstLine = trimmed.split("\n", 1)[0] ?? "";
+  const body = firstLine.startsWith("# ")
+    ? trimmed
+    : `# ${args.title}\n\n${trimmed}`;
+  const final = body.endsWith("\n") ? body : `${body}\n`;
+
+  await fs.writeFile(abs, final, "utf8");
+  const bytes = Buffer.byteLength(final, "utf8");
+  const note = doneExisted
+    ? ` (note: a previous ${slug}${PLAN_DONE_SUFFIX} also exists)`
+    : "";
+  return `Wrote plan to ${relToWorkspace(abs)} (${bytes} bytes)${note}`;
 }
 
 function stripHtml(html: string): string {
@@ -340,124 +405,215 @@ type ServerTool = {
 
 export type AnyTool = OpenAI.Chat.Completions.ChatCompletionTool | ServerTool;
 
-export const TOOL_SCHEMAS: AnyTool[] = [
-  {
-    type: "function",
-    function: {
-      name: "read_file",
-      description:
-        "Read the contents of a text file from the workspace. Paths are relative to WORKSPACE_ROOT. Long contents are truncated automatically.",
-      parameters: {
-        type: "object",
-        properties: {
-          path: {
-            type: "string",
-            description: "Relative path to the file inside the workspace.",
-          },
-        },
-        required: ["path"],
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "list_files",
-      description:
-        "List files and subdirectories starting from the given directory up to depth 2. Folders like node_modules, .git and dist are skipped.",
-      parameters: {
-        type: "object",
-        properties: {
-          path: {
-            type: "string",
-            description:
-              "Relative folder path inside the workspace. Default: workspace root.",
-          },
-        },
-        required: [],
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "edit_file",
-      description:
-        "Write the given content to a file (overwrite). Creates missing parent directories inside the workspace.",
-      parameters: {
-        type: "object",
-        properties: {
-          path: {
-            type: "string",
-            description: "Relative path to the target file inside the workspace.",
-          },
-          content: {
-            type: "string",
-            description: "The full new file contents as a string.",
-          },
-        },
-        required: ["path", "content"],
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "execute_bash",
-      description:
-        "Run a shell command in WORKSPACE_ROOT (cwd is pinned, timeout 30s). Returns combined stdout/stderr plus exit code. Please only use relative paths inside the workspace.",
-      parameters: {
-        type: "object",
-        properties: {
-          command: {
-            type: "string",
-            description: "The shell command to execute.",
-          },
-        },
-        required: ["command"],
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "fetch_url",
-      description:
-        "Fetch a public URL over http(s) and return its content as text. HTML is stripped to readable text, JSON is pretty-printed, plain text is returned as-is. Use this to read documentation pages, blog posts or JSON API responses. Follows redirects, 15s timeout.",
-      parameters: {
-        type: "object",
-        properties: {
-          url: {
-            type: "string",
-            description: "Absolute http:// or https:// URL to fetch.",
-          },
-          max_bytes: {
-            type: "integer",
-            description:
-              "Optional maximum number of bytes to read from the response body. Default 500000, capped at 5000000.",
-            minimum: 1,
-          },
-        },
-        required: ["url"],
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: "openrouter:web_search",
+const READ_FILE_SCHEMA: AnyTool = {
+  type: "function",
+  function: {
+    name: "read_file",
+    description:
+      "Read the contents of a text file from the workspace. Paths are relative to WORKSPACE_ROOT. Long contents are truncated automatically.",
     parameters: {
-      max_results: 5,
-      max_total_results: 15,
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "Relative path to the file inside the workspace.",
+        },
+      },
+      required: ["path"],
+      additionalProperties: false,
     },
   },
-  {
-    type: "openrouter:datetime",
+};
+
+const LIST_FILES_SCHEMA: AnyTool = {
+  type: "function",
+  function: {
+    name: "list_files",
+    description:
+      "List files and subdirectories starting from the given directory up to depth 2. Folders like node_modules, .git and dist are skipped.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description:
+            "Relative folder path inside the workspace. Default: workspace root.",
+        },
+      },
+      required: [],
+      additionalProperties: false,
+    },
   },
+};
+
+const EDIT_FILE_SCHEMA: AnyTool = {
+  type: "function",
+  function: {
+    name: "edit_file",
+    description:
+      "Write the given content to a file (overwrite). Creates missing parent directories inside the workspace.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "Relative path to the target file inside the workspace.",
+        },
+        content: {
+          type: "string",
+          description: "The full new file contents as a string.",
+        },
+      },
+      required: ["path", "content"],
+      additionalProperties: false,
+    },
+  },
+};
+
+const EXECUTE_BASH_SCHEMA: AnyTool = {
+  type: "function",
+  function: {
+    name: "execute_bash",
+    description:
+      "Run a shell command in WORKSPACE_ROOT (cwd is pinned, timeout 30s). Returns combined stdout/stderr plus exit code. Please only use relative paths inside the workspace.",
+    parameters: {
+      type: "object",
+      properties: {
+        command: {
+          type: "string",
+          description: "The shell command to execute.",
+        },
+      },
+      required: ["command"],
+      additionalProperties: false,
+    },
+  },
+};
+
+const FETCH_URL_SCHEMA: AnyTool = {
+  type: "function",
+  function: {
+    name: "fetch_url",
+    description:
+      "Fetch a public URL over http(s) and return its content as text. HTML is stripped to readable text, JSON is pretty-printed, plain text is returned as-is. Use this to read documentation pages, blog posts or JSON API responses. Follows redirects, 15s timeout.",
+    parameters: {
+      type: "object",
+      properties: {
+        url: {
+          type: "string",
+          description: "Absolute http:// or https:// URL to fetch.",
+        },
+        max_bytes: {
+          type: "integer",
+          description:
+            "Optional maximum number of bytes to read from the response body. Default 500000, capped at 5000000.",
+          minimum: 1,
+        },
+      },
+      required: ["url"],
+      additionalProperties: false,
+    },
+  },
+};
+
+const WEB_SEARCH_SCHEMA: AnyTool = {
+  type: "openrouter:web_search",
+  parameters: {
+    max_results: 5,
+    max_total_results: 15,
+  },
+};
+
+const DATETIME_SCHEMA: AnyTool = {
+  type: "openrouter:datetime",
+};
+
+const ASK_USER_SCHEMA: AnyTool = {
+  type: "function",
+  function: {
+    name: "ask_user",
+    description:
+      "Ask the developer a short clarifying question and get their answer back. Use type='choice' with 2-6 concrete options whenever possible; only use type='text' when free-form input is truly needed. Plan mode only.",
+    parameters: {
+      type: "object",
+      properties: {
+        question: {
+          type: "string",
+          description: "The question shown to the user. Keep it short and specific.",
+        },
+        type: {
+          type: "string",
+          enum: ["choice", "text"],
+          description:
+            "'choice' shows a multiple-choice picker using the 'options' field. 'text' asks for free-form input.",
+        },
+        options: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "For type='choice': 2-6 option labels. Ignored for type='text'.",
+        },
+      },
+      required: ["question", "type"],
+      additionalProperties: false,
+    },
+  },
+};
+
+const WRITE_PLAN_SCHEMA: AnyTool = {
+  type: "function",
+  function: {
+    name: "write_plan",
+    description:
+      `Write the final plan as markdown to ${PLANS_DIR}/<slug>${PLAN_FILE_SUFFIX}. Call this exactly once at the end of planning. The slug must be a short kebab-case identifier (lowercase a-z, digits, '-'). Do not include the file suffix in the slug. Plan mode only.`,
+    parameters: {
+      type: "object",
+      properties: {
+        slug: {
+          type: "string",
+          description:
+            "Short kebab-case identifier, e.g. 'add-plan-mode'. Used as the filename.",
+        },
+        title: {
+          type: "string",
+          description:
+            "Human-readable plan title. Used as '# Title' if the content does not already start with one.",
+        },
+        content: {
+          type: "string",
+          description:
+            "Full markdown body of the plan. Should include sections: Goal, Affected Files, Steps, Open Questions, Test Plan.",
+        },
+      },
+      required: ["slug", "title", "content"],
+      additionalProperties: false,
+    },
+  },
+};
+
+const READ_TOOL_SCHEMAS: AnyTool[] = [
+  READ_FILE_SCHEMA,
+  LIST_FILES_SCHEMA,
+  FETCH_URL_SCHEMA,
+  WEB_SEARCH_SCHEMA,
+  DATETIME_SCHEMA,
 ];
+
+const WRITE_TOOL_SCHEMAS: AnyTool[] = [EDIT_FILE_SCHEMA, EXECUTE_BASH_SCHEMA];
+
+export const AGENT_TOOL_SCHEMAS: AnyTool[] = [
+  ...READ_TOOL_SCHEMAS,
+  ...WRITE_TOOL_SCHEMAS,
+];
+
+export const PLAN_TOOL_SCHEMAS: AnyTool[] = [
+  ...READ_TOOL_SCHEMAS,
+  ASK_USER_SCHEMA,
+  WRITE_PLAN_SCHEMA,
+];
+
+// Kept for backwards compatibility with any external consumer.
+export const TOOL_SCHEMAS: AnyTool[] = AGENT_TOOL_SCHEMAS;
 
 type ToolHandler = (
   args: Record<string, unknown>,
@@ -472,6 +628,8 @@ export const TOOL_REGISTRY: Record<string, ToolHandler> = {
     executeBashTool(args as { command: string }, signal),
   fetch_url: (args, signal) =>
     fetchUrlTool(args as { url: string; max_bytes?: number }, signal),
+  write_plan: (args) =>
+    writePlanTool(args as { slug: string; title: string; content: string }),
 };
 
 export async function runTool(

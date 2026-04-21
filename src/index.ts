@@ -55,6 +55,9 @@ import {
   runAgent,
   buildInitialHistory,
   type AgentReporter,
+  type AskUserHandler,
+  type AskUserRequest,
+  type RunAgentOptions,
   type ToolCallRecord,
   type UserContent,
 } from "./agent.ts";
@@ -62,14 +65,20 @@ import {
   CURATED_MODELS,
   DEFAULT_MODEL,
   OPENROUTER_API_KEY_ENV,
+  PLAN_DONE_SUFFIX,
+  PLAN_FILE_SUFFIX,
+  PLAN_SYSTEM_PROMPT,
+  PLANS_DIR,
   SPINNER_FRAMES,
   SPINNER_INTERVAL_MS,
+  SYSTEM_PROMPT,
   TOOL_LIST_ARG_PREVIEW_MAX,
   TOOL_PREVIEW_MAX_CHARS,
   TOOL_PREVIEW_MAX_LINES,
   VISION_HINTS,
   WORKSPACE_ROOT,
 } from "./config.ts";
+import { AGENT_TOOL_SCHEMAS, PLAN_TOOL_SCHEMAS, sanitizePlanSlug } from "./tools.ts";
 import {
   parseImages,
   dumpClipboardImage,
@@ -77,6 +86,8 @@ import {
   type ParsedImage,
 } from "./images.ts";
 import { selectFromList, type SelectOption } from "./select.ts";
+
+type Mode = "agent" | "plan";
 
 function parseModelFlag(argv: string[]): string | undefined {
   for (let i = 0; i < argv.length; i++) {
@@ -115,6 +126,7 @@ const C = {
   yellow: (s: string) => `\x1b[33m${s}\x1b[0m`,
   red: (s: string) => `\x1b[31m${s}\x1b[0m`,
   green: (s: string) => `\x1b[32m${s}\x1b[0m`,
+  magenta: (s: string) => `\x1b[35m${s}\x1b[0m`,
 };
 
 type Spinner = {
@@ -265,16 +277,21 @@ function printHelp(): void {
     [
       "",
       C.bold("Commands:"),
-      "  /help            Show this help",
-      "  /model           Show the current model",
-      "  /model <slug>    Switch model directly (e.g. /model openai/gpt-5.4)",
-      "  /models          Interactive model picker (↑↓ + Enter)",
-      "  /paste [text]    Attach the macOS clipboard image, optionally with text",
-      "  /tools           List tool calls from the last agent run",
-      "  /tool            Interactive tool-call picker (↑↓ + Enter)",
-      "  /tool <n>        Show full args and result for tool call #n",
-      "  /reset           Clear the chat history",
-      "  /exit, exit      Quit (also Ctrl-C)",
+      "  /help                Show this help",
+      "  /model               Show the current model",
+      "  /model <slug>        Switch model directly (e.g. /model openai/gpt-5.4)",
+      "  /models              Interactive model picker (↑↓ + Enter)",
+      "  /paste [text]        Attach the macOS clipboard image, optionally with text",
+      "  /tools               List tool calls from the last agent run",
+      "  /tool                Interactive tool-call picker (↑↓ + Enter)",
+      "  /tool <n>            Show full args and result for tool call #n",
+      "  /plan                Switch to plan mode (read-only, writes .blackbox/plans/*.plan.md)",
+      "  /agent               Switch back to agent mode (default, can edit files)",
+      "  /plans               List open plans in .blackbox/plans/",
+      "  /plans all           List open and done plans",
+      "  /plan done <slug>    Mark a plan as done (renames to .plan.done.md)",
+      "  /reset               Clear the chat history (keeps current mode)",
+      "  /exit, exit          Quit (also Ctrl-C)",
       "",
       C.dim(
         "  Tip: just include an image path or http(s) URL in your prompt —",
@@ -388,12 +405,209 @@ async function pickToolCall(
   }
 }
 
+type PlanEntry = {
+  slug: string;
+  filename: string;
+  absPath: string;
+  relPath: string;
+  done: boolean;
+  mtimeMs: number;
+};
+
+async function listPlans(): Promise<PlanEntry[]> {
+  const fsMod = await import("node:fs/promises");
+  const pathMod = await import("node:path");
+  const dirAbs = pathMod.join(WORKSPACE_ROOT, PLANS_DIR);
+  let entries: import("node:fs").Dirent[];
+  try {
+    entries = await fsMod.readdir(dirAbs, { withFileTypes: true });
+  } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    if (code === "ENOENT") return [];
+    throw err;
+  }
+
+  const results: PlanEntry[] = [];
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const name = entry.name;
+    const isDone = name.endsWith(PLAN_DONE_SUFFIX);
+    const isOpen = !isDone && name.endsWith(PLAN_FILE_SUFFIX);
+    if (!isOpen && !isDone) continue;
+    const slug = name.slice(
+      0,
+      name.length - (isDone ? PLAN_DONE_SUFFIX.length : PLAN_FILE_SUFFIX.length),
+    );
+    const absPath = pathMod.join(dirAbs, name);
+    let mtimeMs = 0;
+    try {
+      const st = await fsMod.stat(absPath);
+      mtimeMs = st.mtimeMs;
+    } catch {
+      // ignore stat failure
+    }
+    results.push({
+      slug,
+      filename: name,
+      absPath,
+      relPath: pathMod.join(PLANS_DIR, name),
+      done: isDone,
+      mtimeMs,
+    });
+  }
+  results.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return results;
+}
+
+async function printPlans(showAll: boolean): Promise<void> {
+  const all = await listPlans();
+  const plans = showAll ? all : all.filter((p) => !p.done);
+  console.log("");
+  if (plans.length === 0) {
+    if (showAll) {
+      console.log(C.dim(`No plans in ${PLANS_DIR}/ yet.`));
+    } else {
+      const doneCount = all.filter((p) => p.done).length;
+      if (doneCount > 0) {
+        console.log(
+          C.dim(
+            `No open plans. ${doneCount} done plan${doneCount === 1 ? "" : "s"} archived — use /plans all to show.`,
+          ),
+        );
+      } else {
+        console.log(C.dim(`No plans in ${PLANS_DIR}/ yet.`));
+      }
+    }
+    console.log("");
+    return;
+  }
+  console.log(
+    C.bold(
+      showAll ? `Plans in ${PLANS_DIR}/ (${plans.length}):` : `Open plans (${plans.length}):`,
+    ),
+  );
+  for (const p of plans) {
+    const marker = p.done ? C.dim(" [done]") : "";
+    console.log(`  ${p.slug}${marker}  ${C.dim(p.relPath)}`);
+  }
+  console.log("");
+}
+
+async function markPlanDone(rawTarget: string): Promise<void> {
+  const fsMod = await import("node:fs/promises");
+  const pathMod = await import("node:path");
+  let target = rawTarget.trim();
+  if (target.length === 0) {
+    console.log(C.red("/plan done: slug is required. Usage: /plan done <slug>"));
+    return;
+  }
+  if (target.endsWith(PLAN_DONE_SUFFIX)) {
+    target = target.slice(0, -PLAN_DONE_SUFFIX.length);
+  } else if (target.endsWith(PLAN_FILE_SUFFIX)) {
+    target = target.slice(0, -PLAN_FILE_SUFFIX.length);
+  }
+  const slug = sanitizePlanSlug(target);
+  if (slug.length === 0) {
+    console.log(C.red(`/plan done: "${rawTarget}" is not a valid slug.`));
+    return;
+  }
+
+  const dirAbs = pathMod.join(WORKSPACE_ROOT, PLANS_DIR);
+  const openAbs = pathMod.join(dirAbs, `${slug}${PLAN_FILE_SUFFIX}`);
+  const doneAbs = pathMod.join(dirAbs, `${slug}${PLAN_DONE_SUFFIX}`);
+
+  try {
+    await fsMod.access(openAbs);
+  } catch {
+    try {
+      await fsMod.access(doneAbs);
+      console.log(
+        C.yellow(
+          `/plan done: "${slug}" is already marked done (${pathMod.join(PLANS_DIR, `${slug}${PLAN_DONE_SUFFIX}`)}).`,
+        ),
+      );
+    } catch {
+      console.log(
+        C.red(
+          `/plan done: no plan found for slug "${slug}" in ${PLANS_DIR}/.`,
+        ),
+      );
+    }
+    return;
+  }
+
+  try {
+    await fsMod.access(doneAbs);
+    console.log(
+      C.red(
+        `/plan done: target "${slug}${PLAN_DONE_SUFFIX}" already exists. Rename or remove it first.`,
+      ),
+    );
+    return;
+  } catch {
+    // target free, continue
+  }
+
+  try {
+    await fsMod.rename(openAbs, doneAbs);
+    console.log(
+      C.green(
+        `Marked plan done: ${pathMod.join(PLANS_DIR, `${slug}${PLAN_FILE_SUFFIX}`)} → ${pathMod.join(PLANS_DIR, `${slug}${PLAN_DONE_SUFFIX}`)}`,
+      ),
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.log(C.red(`/plan done failed: ${msg}`));
+  }
+}
+
+function makeAskUser(
+  rl: readline.Interface,
+  spinner: Spinner,
+): AskUserHandler {
+  return async (request: AskUserRequest): Promise<string> => {
+    spinner.stop();
+    console.log("");
+    console.log(C.bold(C.magenta("?")) + " " + C.bold(request.question));
+    try {
+      if (request.type === "choice") {
+        const opts: SelectOption<string>[] = (request.options ?? []).map(
+          (label) => ({ label, value: label }),
+        );
+        rl.pause();
+        let picked: string | undefined;
+        try {
+          picked = await selectFromList<string>({
+            options: opts,
+            pageSize: Math.min(opts.length, 6),
+            helpHint: "  ↑↓ move · Enter select · Esc skip",
+          });
+        } finally {
+          rl.resume();
+        }
+        console.log("");
+        return picked ?? "";
+      }
+      const answer = await rl.question(C.dim("  answer > "));
+      return answer;
+    } finally {
+      spinner.start("working…");
+    }
+  };
+}
+
 async function main(): Promise<void> {
   const initial = resolveInitialModel();
   let model = initial.model;
-  let history = buildInitialHistory();
+  let mode: Mode = "agent";
+  let history = buildInitialHistory(SYSTEM_PROMPT);
   let lastToolCalls: ToolCallRecord[] = [];
   const spinner = createSpinner();
+
+  const systemPromptFor = (m: Mode): string =>
+    m === "plan" ? PLAN_SYSTEM_PROMPT : SYSTEM_PROMPT;
+  const promptPrefix = (): string =>
+    mode === "plan" ? C.bold(C.magenta("plan > ")) : C.bold("> ");
 
   console.log(C.bold(C.cyan("blackbox") + " — minimal CLI coding agent"));
   console.log(C.dim(`  Workspace: ${WORKSPACE_ROOT}`));
@@ -416,6 +630,7 @@ async function main(): Promise<void> {
   persistModel(model);
 
   console.log(C.dim(`  Model:     ${model}`));
+  console.log(C.dim(`  Mode:      ${mode} (use /plan or /agent to switch)`));
   console.log(
     C.dim("  Tip: /help for commands, Ctrl-C cancels a run or exits when idle."),
   );
@@ -465,14 +680,14 @@ async function main(): Promise<void> {
       "\r\x1b[2K" +
       C.yellow("Press Ctrl-C again within 2s to exit.") +
       "\n" +
-      C.bold("> "),
+      promptPrefix(),
     );
   });
 
   while (true) {
     let line: string;
     try {
-      line = await rl.question(C.bold("> "));
+      line = await rl.question(promptPrefix());
     } catch {
       break;
     }
@@ -490,9 +705,59 @@ async function main(): Promise<void> {
     }
 
     if (entry === "/reset") {
-      history = buildInitialHistory();
+      history = buildInitialHistory(systemPromptFor(mode));
       lastToolCalls = [];
-      console.log(C.dim("History cleared."));
+      console.log(
+        C.dim(
+          `History cleared (${mode} mode).`,
+        ),
+      );
+      continue;
+    }
+
+    if (entry === "/plan") {
+      if (mode === "plan") {
+        console.log(C.dim("Already in plan mode."));
+      } else {
+        mode = "plan";
+        history = buildInitialHistory(PLAN_SYSTEM_PROMPT);
+        lastToolCalls = [];
+        console.log(
+          C.magenta("Plan mode active.") +
+          C.dim(
+            ` Read-only; writes plans to ${PLANS_DIR}/<slug>${PLAN_FILE_SUFFIX}. Use /agent to leave.`,
+          ),
+        );
+      }
+      continue;
+    }
+
+    if (entry === "/agent") {
+      if (mode === "agent") {
+        console.log(C.dim("Already in agent mode."));
+      } else {
+        mode = "agent";
+        history = buildInitialHistory(SYSTEM_PROMPT);
+        lastToolCalls = [];
+        console.log(C.green("Agent mode active."));
+      }
+      continue;
+    }
+
+    if (entry === "/plans") {
+      await printPlans(false);
+      continue;
+    }
+
+    if (entry === "/plans all") {
+      await printPlans(true);
+      continue;
+    }
+
+    if (entry.startsWith("/plan done")) {
+      const rest =
+        entry === "/plan done" ? "" : entry.slice("/plan done ".length).trim();
+      await markPlanDone(rest);
       continue;
     }
 
@@ -609,6 +874,14 @@ async function main(): Promise<void> {
     const historyBefore = history.length;
     clearExitConfirm();
 
+    const runOptions: RunAgentOptions =
+      mode === "plan"
+        ? {
+          toolSchemas: PLAN_TOOL_SCHEMAS,
+          askUser: makeAskUser(rl, spinner),
+        }
+        : { toolSchemas: AGENT_TOOL_SCHEMAS };
+
     spinner.start("working…");
     try {
       const { answer, toolCalls } = await runAgent(
@@ -617,6 +890,7 @@ async function main(): Promise<void> {
         model,
         reporter,
         abort.signal,
+        runOptions,
       );
       spinner.stop();
       lastToolCalls = toolCalls;
