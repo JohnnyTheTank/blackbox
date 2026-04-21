@@ -18,17 +18,12 @@ if (existsSync(envPath) && typeof process.loadEnvFile === "function") {
 import { runAgent, buildInitialHistory } from "./agent.ts";
 import { WORKSPACE_ROOT } from "./sandbox.ts";
 
-const DEFAULT_MODEL = "google/gemini-3-flash-preview";
+const DEFAULT_MODEL = "anthropic/claude-sonnet-4.5";
 
 const CURATED_MODELS = [
   "anthropic/claude-sonnet-4.5",
-  "anthropic/claude-opus-4.1",
-  "openai/gpt-5",
-  "openai/gpt-4.1",
   "google/gemini-3-flash-preview",
   "nvidia/nemotron-3-super-120b-a12b:free",
-  "x-ai/grok-4",
-  "deepseek/deepseek-chat",
 ];
 
 function parseModelFlag(argv: string[]): string | undefined {

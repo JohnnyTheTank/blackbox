@@ -2,6 +2,7 @@ import OpenAI from "openai";
 import type {
   ChatCompletionMessageParam,
   ChatCompletionMessageToolCall,
+  ChatCompletionTool,
 } from "openai/resources/chat/completions";
 
 import { TOOL_SCHEMAS, runTool } from "./tools.ts";
@@ -23,10 +24,15 @@ Rules:
 - End with a concise summary of the changes or findings in English.
 
 Available tools:
-- read_file(path)
-- list_files(path?)
-- edit_file(path, content)
-- execute_bash(command)`;
+- read_file(path) — read a file inside WORKSPACE_ROOT
+- list_files(path?) — list files/subdirs up to depth 2
+- edit_file(path, content) — overwrite a file inside WORKSPACE_ROOT
+- execute_bash(command) — run a shell command in WORKSPACE_ROOT
+- fetch_url(url, max_bytes?) — fetch a public http(s) URL and return its text content (HTML is stripped, JSON is pretty-printed). Use this to read documentation or public API responses. Avoid internal or sensitive URLs.
+- openrouter:web_search — server-side web search; invoke when you need current information you don't have. Prefer a specific query.
+- openrouter:datetime — server-side current date and time. Use when the user asks about "now", deadlines, or recent events.
+
+When unsure about a library or API, prefer fetch_url on the official docs or openrouter:web_search over guessing. Do not hallucinate APIs you do not know.`;
 
 function createClient(): OpenAI {
   const apiKey = process.env.OPENROUTER_API_KEY;
@@ -77,7 +83,7 @@ export async function runAgent(
     const response = await client.chat.completions.create({
       model,
       messages: history,
-      tools: TOOL_SCHEMAS,
+      tools: TOOL_SCHEMAS as ChatCompletionTool[],
     });
 
     const choice = response.choices[0];

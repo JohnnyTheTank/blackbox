@@ -89,14 +89,35 @@ Full list of tool-capable models:
 
 ## Tools
 
-| Tool           | Parameters              | Sandbox               |
-| -------------- | ----------------------- | --------------------- |
-| `read_file`    | `path`                  | hard (`assertInside`) |
-| `list_files`   | `path?` (default: root) | hard (`assertInside`) |
-| `edit_file`    | `path`, `content`       | hard (`assertInside`) |
-| `execute_bash` | `command`               | `cwd`-pinned          |
+### Local (function tools)
+
+| Tool           | Parameters              | Sandbox / Notes                                                                             |
+| -------------- | ----------------------- | ------------------------------------------------------------------------------------------- |
+| `read_file`    | `path`                  | hard (`assertInside`)                                                                       |
+| `list_files`   | `path?` (default: root) | hard (`assertInside`)                                                                       |
+| `edit_file`    | `path`, `content`       | hard (`assertInside`)                                                                       |
+| `execute_bash` | `command`               | `cwd`-pinned                                                                                |
+| `fetch_url`    | `url`, `max_bytes?`     | none (network); 15s timeout, 500 KB default cap; HTML stripped to text, JSON pretty-printed |
+
+### Remote (OpenRouter server tools)
+
+These are executed by OpenRouter itself — the model decides when to call them
+and the result is transparently injected into the conversation.
+
+| Tool                    | Purpose                             | Pricing                            |
+| ----------------------- | ----------------------------------- | ---------------------------------- |
+| `openrouter:web_search` | Real-time web search with citations | ~$4 per 1000 results (Exa default) |
+| `openrouter:datetime`   | Current date and time               | free                               |
+
+See the [OpenRouter docs](https://openrouter.ai/docs/guides/features/server-tools/web-search)
+for configuration options (search engine, domain filters, etc.).
 
 Tool results are truncated at ~8000 characters to keep the context small.
+
+> `fetch_url` follows redirects and accepts any public http(s) URL. It does not
+> know which hosts are "internal" — it could in theory reach `http://localhost:…`
+> or intranet URLs. Don't run the agent on machines with sensitive internal
+> services unless you're comfortable with that (YOLO mode).
 
 ## Project layout
 

@@ -74,6 +74,139 @@ async function editFileTool(args: {
   return `Wrote ${relToWorkspace(abs)} (${bytes} bytes)`;
 }
 
+const HTML_ENTITIES: Record<string, string> = {
+  "&amp;": "&",
+  "&lt;": "<",
+  "&gt;": ">",
+  "&quot;": '"',
+  "&#39;": "'",
+  "&apos;": "'",
+  "&nbsp;": " ",
+};
+
+function stripHtml(html: string): string {
+  let text = html;
+  text = text.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "");
+  text = text.replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "");
+  text = text.replace(/<!--[\s\S]*?-->/g, "");
+  text = text.replace(/<(br|\/p|\/div|\/h[1-6]|\/li|\/tr|li|tr)[^>]*>/gi, "\n");
+  text = text.replace(/<[^>]+>/g, "");
+  text = text.replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)));
+  text = text.replace(/&#x([0-9a-f]+);/gi, (_, h) =>
+    String.fromCodePoint(parseInt(h, 16)),
+  );
+  text = text.replace(/&[a-z]+;/gi, (m) => HTML_ENTITIES[m.toLowerCase()] ?? m);
+  text = text.replace(/[ \t]+/g, " ");
+  text = text.replace(/\n[ \t]+/g, "\n");
+  text = text.replace(/\n{3,}/g, "\n\n");
+  return text.trim();
+}
+
+async function fetchUrlTool(args: {
+  url: string;
+  max_bytes?: number;
+}): Promise<string> {
+  const rawUrl = args.url;
+  if (typeof rawUrl !== "string" || rawUrl.length === 0) {
+    throw new Error("fetch_url requires a non-empty 'url' string");
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error(`Invalid URL: ${rawUrl}`);
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(`Only http(s) URLs are supported, got: ${parsed.protocol}`);
+  }
+
+  const maxBytes =
+    typeof args.max_bytes === "number" && args.max_bytes > 0
+      ? Math.min(args.max_bytes, 5_000_000)
+      : 500_000;
+
+  const ctrl = new AbortController();
+  const timeout = setTimeout(() => ctrl.abort(), 15_000);
+
+  try {
+    const res = await fetch(parsed.toString(), {
+      redirect: "follow",
+      signal: ctrl.signal,
+      headers: {
+        "User-Agent": "blackbox-cli-agent/0.1",
+        Accept: "text/html,text/plain,application/json,*/*;q=0.8",
+      },
+    });
+
+    const contentType = res.headers.get("content-type") ?? "unknown";
+    const finalUrl = res.url || parsed.toString();
+
+    if (!res.body) {
+      const text = await res.text();
+      return truncate(
+        `URL: ${finalUrl}\nStatus: ${res.status}\nContent-Type: ${contentType}\n\n${text}`,
+      );
+    }
+
+    const reader = res.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let received = 0;
+    let truncatedByCap = false;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      if (received + value.byteLength > maxBytes) {
+        const remain = maxBytes - received;
+        if (remain > 0) chunks.push(value.subarray(0, remain));
+        truncatedByCap = true;
+        try {
+          await reader.cancel();
+        } catch {
+          // ignore cancel errors
+        }
+        break;
+      }
+      chunks.push(value);
+      received += value.byteLength;
+    }
+
+    const raw = Buffer.concat(chunks.map((c) => Buffer.from(c))).toString("utf8");
+
+    let body: string;
+    if (contentType.includes("application/json")) {
+      try {
+        body = JSON.stringify(JSON.parse(raw), null, 2);
+      } catch {
+        body = raw;
+      }
+    } else if (
+      contentType.includes("text/html") ||
+      contentType.includes("application/xhtml")
+    ) {
+      body = stripHtml(raw);
+    } else {
+      body = raw;
+    }
+
+    const capNote = truncatedByCap
+      ? `\n[body capped at ${maxBytes} bytes]`
+      : "";
+    return truncate(
+      `URL: ${finalUrl}\nStatus: ${res.status}\nContent-Type: ${contentType}${capNote}\n\n${body}`,
+    );
+  } catch (err: unknown) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error(`Timeout while fetching ${parsed.toString()} (15s)`);
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`fetch failed: ${msg}`);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function executeBashTool(args: { command: string }): Promise<string> {
   const command = args.command;
   if (typeof command !== "string" || command.trim().length === 0) {
@@ -108,7 +241,14 @@ async function executeBashTool(args: { command: string }): Promise<string> {
   }
 }
 
-export const TOOL_SCHEMAS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
+type ServerTool = {
+  type: `openrouter:${string}`;
+  parameters?: Record<string, unknown>;
+};
+
+export type AnyTool = OpenAI.Chat.Completions.ChatCompletionTool | ServerTool;
+
+export const TOOL_SCHEMAS: AnyTool[] = [
   {
     type: "function",
     function: {
@@ -190,6 +330,41 @@ export const TOOL_SCHEMAS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "fetch_url",
+      description:
+        "Fetch a public URL over http(s) and return its content as text. HTML is stripped to readable text, JSON is pretty-printed, plain text is returned as-is. Use this to read documentation pages, blog posts or JSON API responses. Follows redirects, 15s timeout.",
+      parameters: {
+        type: "object",
+        properties: {
+          url: {
+            type: "string",
+            description: "Absolute http:// or https:// URL to fetch.",
+          },
+          max_bytes: {
+            type: "integer",
+            description:
+              "Optional maximum number of bytes to read from the response body. Default 500000, capped at 5000000.",
+            minimum: 1,
+          },
+        },
+        required: ["url"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "openrouter:web_search",
+    parameters: {
+      max_results: 5,
+      max_total_results: 15,
+    },
+  },
+  {
+    type: "openrouter:datetime",
+  },
 ];
 
 type ToolHandler = (args: Record<string, unknown>) => Promise<string>;
@@ -199,6 +374,7 @@ export const TOOL_REGISTRY: Record<string, ToolHandler> = {
   list_files: (args) => listFilesTool(args as { path?: string }),
   edit_file: (args) => editFileTool(args as { path: string; content: string }),
   execute_bash: (args) => executeBashTool(args as { command: string }),
+  fetch_url: (args) => fetchUrlTool(args as { url: string; max_bytes?: number }),
 };
 
 export async function runTool(
