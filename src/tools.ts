@@ -29,17 +29,43 @@ import {
   WORKSPACE_ROOT,
 } from "./config.ts";
 
-function truncate(text: string): string {
+function truncate(text: string, options?: { hint?: string }): string {
   if (text.length <= TOOL_OUTPUT_MAX_CHARS) return text;
   const head = text.slice(0, TOOL_OUTPUT_MAX_CHARS);
   const dropped = text.length - TOOL_OUTPUT_MAX_CHARS;
-  return `${head}\n... [truncated, ${dropped} more characters]`;
+  const hint = options?.hint ? ` — ${options.hint}` : "";
+  return `${head}\n... [truncated, ${dropped} more characters${hint}]`;
 }
 
-async function readFileTool(args: { path: string }): Promise<string> {
+async function readFileTool(args: {
+  path: string;
+  offset?: number;
+  limit?: number;
+}): Promise<string> {
   const abs = assertInside(args.path);
   const content = await fs.readFile(abs, "utf8");
-  return truncate(content);
+  const allLines = content.split("\n");
+  const total = allLines.length;
+
+  const offsetRaw = args.offset ?? 1;
+  const offset = Math.max(1, Math.floor(offsetRaw));
+  const limit =
+    args.limit !== undefined ? Math.max(1, Math.floor(args.limit)) : total;
+
+  const start = Math.min(offset, Math.max(total, 1));
+  const end = Math.min(start + limit - 1, total);
+  const slice = total === 0 ? [] : allLines.slice(start - 1, end);
+
+  const numbered = slice
+    .map((line, i) => `${String(start + i).padStart(6, " ")}|${line}`)
+    .join("\n");
+
+  const rangeInfo =
+    total === 0 ? "empty" : `lines ${start}-${end} of ${total}`;
+  const header = `# ${relToWorkspace(abs)} [${rangeInfo}]`;
+  return truncate(`${header}\n${numbered}`, {
+    hint: "use read_file with offset/limit to read specific line ranges",
+  });
 }
 
 async function listFilesTool(args: { path?: string }): Promise<string> {
@@ -524,13 +550,24 @@ const READ_FILE_SCHEMA: AnyTool = {
   function: {
     name: "read_file",
     description:
-      "Read the contents of a text file from the workspace. Paths are relative to WORKSPACE_ROOT. Long contents are truncated automatically.",
+      "Read a text file (or a slice of it) from the workspace. Paths are relative to WORKSPACE_ROOT. Output lines are prefixed with their 1-based line number. Use 'offset' and 'limit' to read specific ranges of large files; otherwise, long contents are truncated automatically.",
     parameters: {
       type: "object",
       properties: {
         path: {
           type: "string",
           description: "Relative path to the file inside the workspace.",
+        },
+        offset: {
+          type: "integer",
+          minimum: 1,
+          description: "1-based starting line number. Default: 1.",
+        },
+        limit: {
+          type: "integer",
+          minimum: 1,
+          description:
+            "Maximum number of lines to return starting from 'offset'. Default: until end of file.",
         },
       },
       required: ["path"],

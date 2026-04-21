@@ -105,6 +105,13 @@ import {
   getAgentRegistry,
   listAgents,
 } from "./subagents.ts";
+import {
+  formatRefsBlock,
+  invalidateCache as invalidateRefsCache,
+  resolveRefs,
+  scanWorkspace,
+} from "./refs.ts";
+import { pickPath } from "./pickPath.ts";
 
 type Mode = "agent" | "plan";
 
@@ -314,9 +321,16 @@ function printHelp(): void {
       "  /jobs log <id>       Tail the log of a job",
       "  /agents              List available subagent definitions (.blackbox/agents/*.md)",
       "  /agents reload       Re-read subagent markdown files from disk",
-      "  /reset               Clear the chat history (keeps current mode)",
+      "  /refs reload         Re-scan the workspace for @-reference autocomplete",
+      "  /clear               Clear the chat history (keeps current mode)",
       "  /exit, exit          Quit (also Ctrl-C)",
       "",
+      C.dim(
+        "  Tip: press '@' at the start of a token to open a file/folder picker;",
+      ),
+      C.dim(
+        "       referenced @path tokens are expanded into the prompt automatically.",
+      ),
       C.dim(
         "  Tip: just include an image path or http(s) URL in your prompt —",
       ),
@@ -877,6 +891,78 @@ async function main(): Promise<void> {
   let pendingExitConfirm = false;
   let exitConfirmTimer: NodeJS.Timeout | null = null;
 
+  // @-reference picker wiring: capture readline's existing keypress listeners
+  // upfront so we can briefly detach them while our filterable picker takes
+  // over stdin, and reattach them afterwards.
+  type KpListener = (...args: unknown[]) => void;
+  const rlKeypressListeners = (input.listeners("keypress") as KpListener[]).slice();
+  let pickerActive = false;
+
+  if (isTTY) {
+    scanWorkspace().catch(() => {
+      // best-effort; errors surface when the user tries to use @
+    });
+  }
+
+  const refreshRlLine = (): void => {
+    const anyRl = rl as unknown as { _refreshLine?: () => void };
+    if (typeof anyRl._refreshLine === "function") {
+      try {
+        anyRl._refreshLine();
+      } catch {
+        // ignore; private API
+      }
+    }
+  };
+
+  const openRefPicker = async (): Promise<void> => {
+    if (pickerActive) return;
+    if (currentAbort !== null) return;
+    if (!isTTY) return;
+    const line = rl.line ?? "";
+    if (!line.endsWith("@")) return;
+    const prev = line.length >= 2 ? line[line.length - 2] : undefined;
+    if (prev !== undefined && !/\s/.test(prev)) return;
+
+    pickerActive = true;
+    try {
+      for (const l of rlKeypressListeners) input.off("keypress", l);
+      rl.pause();
+      const picked = await pickPath({});
+      rl.resume();
+      for (const l of rlKeypressListeners) input.on("keypress", l);
+      if (picked) {
+        const insert = picked.isDirectory
+          ? picked.relPath.replace(/\/?$/, "/")
+          : picked.relPath;
+        rl.write(insert);
+      } else {
+        refreshRlLine();
+      }
+    } catch (err) {
+      for (const l of rlKeypressListeners) {
+        if (!input.listeners("keypress").includes(l)) {
+          input.on("keypress", l);
+        }
+      }
+      const msg = err instanceof Error ? err.message : String(err);
+      console.log(`\n${C.red(`@-picker error: ${msg}`)}`);
+      refreshRlLine();
+    } finally {
+      pickerActive = false;
+    }
+  };
+
+  const onAtKeypress = (str: string | undefined): void => {
+    if (pickerActive) return;
+    if (currentAbort !== null) return;
+    if (str !== "@") return;
+    setImmediate(() => {
+      void openRefPicker();
+    });
+  };
+  input.on("keypress", onAtKeypress);
+
   const clearExitConfirm = (): void => {
     pendingExitConfirm = false;
     if (exitConfirmTimer) {
@@ -1013,7 +1099,7 @@ async function main(): Promise<void> {
       continue;
     }
 
-    if (entry === "/reset") {
+    if (entry === "/clear") {
       history = buildInitialHistory(systemPromptFor(mode));
       lastToolCalls = [];
       console.log(
@@ -1180,6 +1266,20 @@ async function main(): Promise<void> {
       continue;
     }
 
+    if (entry === "/refs reload") {
+      invalidateRefsCache();
+      try {
+        const entries = await scanWorkspace(true);
+        console.log(
+          C.green(`Rescanned workspace: ${entries.length} entries cached.`),
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.log(C.red(`/refs reload failed: ${msg}`));
+      }
+      continue;
+    }
+
     if (entry === "/tools") {
       printTools(lastToolCalls);
       continue;
@@ -1259,6 +1359,22 @@ async function main(): Promise<void> {
     }
 
     const promptSource = pasteText ?? entry;
+
+    const refsResult = await resolveRefs(promptSource);
+    for (const w of refsResult.warnings) {
+      console.log(C.yellow(`  ${w}`));
+    }
+    if (refsResult.refs.length > 0) {
+      for (const ref of refsResult.refs) {
+        const marker =
+          ref.kind === "file"
+            ? `${ref.content.length} chars`
+            : ref.note;
+        console.log(C.dim(`  referenced: @${ref.relPath} (${ref.kind}, ${marker})`));
+      }
+    }
+    const refsBlock = formatRefsBlock(refsResult.refs);
+
     const { text, images, warnings } = parseImages(promptSource);
 
     for (const w of warnings) {
@@ -1276,7 +1392,13 @@ async function main(): Promise<void> {
       }
     }
 
-    const finalText = text.length > 0 ? text : images.length > 0 ? "" : promptSource;
+    const baseText = text.length > 0 ? text : images.length > 0 ? "" : promptSource;
+    const finalText =
+      refsBlock.length > 0
+        ? baseText.length > 0
+          ? `${refsBlock}\n\n---\n\n${baseText}`
+          : refsBlock
+        : baseText;
     if (images.length === 0 && finalText.length === 0) continue;
 
     const userContent = buildUserContent(finalText, images);

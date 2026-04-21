@@ -114,6 +114,9 @@ Subagents (non-blocking LLM workers):
 - spawn_subagent(agent, task) — start a subagent asynchronously with its own system prompt, model and tool whitelist. Returns a job id like 'sa_1' immediately. Use this to delegate focused sub-tasks (codebase recon, code review, parallel explorations) without blocking your own turn.
 - subagent_result(job_id) — fetch the final answer once status is 'done'. If still running, retry later.
 
+User-supplied context:
+- The user can reference files and folders by typing '@path' in their prompt. When they do, the CLI prepends a "Referenced by the user:" block with the file contents (truncated) or a folder listing before the actual prompt. Treat this block as context the user explicitly handed you — you do not need to re-read those files with read_file unless you need the untruncated version. For referenced folders you still have to call read_file on individual files if you want their content.
+
 When unsure about a library or API, prefer fetch_url on the official docs or openrouter:web_search over guessing. Do not hallucinate APIs you do not know.`;
 
 export const PLAN_SYSTEM_PROMPT = `You are a CLI planning agent working with a developer in their local project. You are in PLAN MODE: you do research and produce a written plan, you do NOT implement anything.
@@ -145,10 +148,13 @@ Slug policy for write_plan:
 - Use a short kebab-case slug derived from the task: lowercase a-z, digits, and '-'. Example: "add-plan-mode", "fix-login-redirect".
 - Do not include the ${PLAN_FILE_SUFFIX} suffix in the slug; the tool appends it.
 
+User-supplied context:
+- The user can reference files and folders via '@path' in their prompt. When they do, the CLI prepends a "Referenced by the user:" block with file contents (truncated) or a folder listing. Use that context directly instead of re-reading the same files with read_file.
+
 Do not guess at APIs or file contents you have not read. If a library or framework is involved and you are unsure, use fetch_url on official docs or openrouter:web_search.`;
 
 // Tools
-export const TOOL_OUTPUT_MAX_CHARS = 8000;
+export const TOOL_OUTPUT_MAX_CHARS = 10000;
 
 export const LIST_MAX_ENTRIES = 400;
 export const LIST_MAX_DEPTH = 2;
@@ -216,3 +222,10 @@ export const SPINNER_INTERVAL_MS = 80;
 export const TOOL_PREVIEW_MAX_LINES = 3;
 export const TOOL_PREVIEW_MAX_CHARS = 240;
 export const TOOL_LIST_ARG_PREVIEW_MAX = 120;
+
+// @-references (user-typed '@path' references in chat prompts)
+export const REFS_MAX_PER_PROMPT = 8;
+export const REFS_MAX_CONTENT_CHARS = 8000;
+export const REFS_MAX_SCAN_ENTRIES = 5000;
+export const REFS_PICKER_PAGE_SIZE = 10;
+export const REFS_PICKER_MAX_RESULTS = 200;
