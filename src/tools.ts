@@ -1,18 +1,28 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { execSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import type OpenAI from "openai";
 
-import { WORKSPACE_ROOT, assertInside, relToWorkspace } from "./sandbox.ts";
-
-const MAX_OUTPUT_CHARS = 8000;
-const MAX_LIST_ENTRIES = 400;
-const LIST_SKIP = new Set(["node_modules", ".git", "dist", ".next", ".turbo"]);
+import { assertInside, relToWorkspace } from "./sandbox.ts";
+import {
+  BASH_MAX_BUFFER_BYTES,
+  BASH_TIMEOUT_MS,
+  FETCH_DEFAULT_MAX_BYTES,
+  FETCH_MAX_BYTES_CAP,
+  FETCH_TIMEOUT_MS,
+  FETCH_USER_AGENT,
+  HTML_ENTITIES,
+  LIST_MAX_DEPTH,
+  LIST_MAX_ENTRIES,
+  LIST_SKIP,
+  TOOL_OUTPUT_MAX_CHARS,
+  WORKSPACE_ROOT,
+} from "./config.ts";
 
 function truncate(text: string): string {
-  if (text.length <= MAX_OUTPUT_CHARS) return text;
-  const head = text.slice(0, MAX_OUTPUT_CHARS);
-  const dropped = text.length - MAX_OUTPUT_CHARS;
+  if (text.length <= TOOL_OUTPUT_MAX_CHARS) return text;
+  const head = text.slice(0, TOOL_OUTPUT_MAX_CHARS);
+  const dropped = text.length - TOOL_OUTPUT_MAX_CHARS;
   return `${head}\n... [truncated, ${dropped} more characters]`;
 }
 
@@ -32,20 +42,19 @@ async function listFilesTool(args: { path?: string }): Promise<string> {
   }
 
   const results: string[] = [];
-  const maxDepth = 2;
 
   async function walk(dir: string, depth: number): Promise<void> {
-    if (results.length >= MAX_LIST_ENTRIES) return;
+    if (results.length >= LIST_MAX_ENTRIES) return;
     const entries = await fs.readdir(dir, { withFileTypes: true });
     entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
-      if (results.length >= MAX_LIST_ENTRIES) return;
+      if (results.length >= LIST_MAX_ENTRIES) return;
       if (LIST_SKIP.has(entry.name)) continue;
       const full = path.join(dir, entry.name);
       const rel = relToWorkspace(full);
       if (entry.isDirectory()) {
         results.push(`${rel}/`);
-        if (depth < maxDepth) {
+        if (depth < LIST_MAX_DEPTH) {
           await walk(full, depth + 1);
         }
       } else if (entry.isFile()) {
@@ -58,7 +67,7 @@ async function listFilesTool(args: { path?: string }): Promise<string> {
 
   await walk(abs, 1);
 
-  const header = `# ${relToWorkspace(abs)} (up to ${MAX_LIST_ENTRIES} entries, depth ${maxDepth})`;
+  const header = `# ${relToWorkspace(abs)} (up to ${LIST_MAX_ENTRIES} entries, depth ${LIST_MAX_DEPTH})`;
   const body = results.length > 0 ? results.join("\n") : "(empty)";
   return truncate(`${header}\n${body}`);
 }
@@ -73,16 +82,6 @@ async function editFileTool(args: {
   const bytes = Buffer.byteLength(args.content, "utf8");
   return `Wrote ${relToWorkspace(abs)} (${bytes} bytes)`;
 }
-
-const HTML_ENTITIES: Record<string, string> = {
-  "&amp;": "&",
-  "&lt;": "<",
-  "&gt;": ">",
-  "&quot;": '"',
-  "&#39;": "'",
-  "&apos;": "'",
-  "&nbsp;": " ",
-};
 
 function stripHtml(html: string): string {
   let text = html;
@@ -102,10 +101,13 @@ function stripHtml(html: string): string {
   return text.trim();
 }
 
-async function fetchUrlTool(args: {
-  url: string;
-  max_bytes?: number;
-}): Promise<string> {
+async function fetchUrlTool(
+  args: {
+    url: string;
+    max_bytes?: number;
+  },
+  signal?: AbortSignal,
+): Promise<string> {
   const rawUrl = args.url;
   if (typeof rawUrl !== "string" || rawUrl.length === 0) {
     throw new Error("fetch_url requires a non-empty 'url' string");
@@ -123,18 +125,23 @@ async function fetchUrlTool(args: {
 
   const maxBytes =
     typeof args.max_bytes === "number" && args.max_bytes > 0
-      ? Math.min(args.max_bytes, 5_000_000)
-      : 500_000;
+      ? Math.min(args.max_bytes, FETCH_MAX_BYTES_CAP)
+      : FETCH_DEFAULT_MAX_BYTES;
 
   const ctrl = new AbortController();
-  const timeout = setTimeout(() => ctrl.abort(), 15_000);
+  const timeout = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+  const onParentAbort = () => ctrl.abort();
+  if (signal) {
+    if (signal.aborted) ctrl.abort();
+    else signal.addEventListener("abort", onParentAbort, { once: true });
+  }
 
   try {
     const res = await fetch(parsed.toString(), {
       redirect: "follow",
       signal: ctrl.signal,
       headers: {
-        "User-Agent": "blackbox-cli-agent/0.1",
+        "User-Agent": FETCH_USER_AGENT,
         Accept: "text/html,text/plain,application/json,*/*;q=0.8",
       },
     });
@@ -198,47 +205,132 @@ async function fetchUrlTool(args: {
     );
   } catch (err: unknown) {
     if (err instanceof Error && err.name === "AbortError") {
-      throw new Error(`Timeout while fetching ${parsed.toString()} (15s)`);
+      if (signal?.aborted) {
+        throw new Error("fetch cancelled by user");
+      }
+      throw new Error(
+        `Timeout while fetching ${parsed.toString()} (${Math.round(FETCH_TIMEOUT_MS / 1000)}s)`,
+      );
     }
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(`fetch failed: ${msg}`);
   } finally {
     clearTimeout(timeout);
+    if (signal) signal.removeEventListener("abort", onParentAbort);
   }
 }
 
-async function executeBashTool(args: { command: string }): Promise<string> {
+async function executeBashTool(
+  args: { command: string },
+  signal?: AbortSignal,
+): Promise<string> {
   const command = args.command;
   if (typeof command !== "string" || command.trim().length === 0) {
     throw new Error("execute_bash requires a non-empty 'command' string");
   }
 
-  try {
-    const out = execSync(command, {
+  return new Promise<string>((resolve) => {
+    const child = spawn(command, {
       cwd: WORKSPACE_ROOT,
-      timeout: 30_000,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
+      shell: true,
       env: { ...process.env, PWD: WORKSPACE_ROOT },
-      maxBuffer: 10 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: true,
     });
-    return truncate(`exit_code: 0\n${out}`);
-  } catch (err: unknown) {
-    const e = err as NodeJS.ErrnoException & {
-      stdout?: Buffer | string;
-      stderr?: Buffer | string;
-      status?: number | null;
-      signal?: string | null;
+
+    let stdout = "";
+    let stderr = "";
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let cancelledByUser = false;
+    let timedOut = false;
+    let settled = false;
+
+    const killTree = (sig: NodeJS.Signals = "SIGTERM"): void => {
+      if (child.pid === undefined) return;
+      try {
+        process.kill(-child.pid, sig);
+      } catch {
+        try {
+          child.kill(sig);
+        } catch {
+          // process is probably already gone
+        }
+      }
     };
-    const stdout = e.stdout ? e.stdout.toString() : "";
-    const stderr = e.stderr ? e.stderr.toString() : "";
-    const code = e.status ?? "null";
-    const signal = e.signal ? ` signal=${e.signal}` : "";
-    const msg = e.message ?? "Unknown error";
-    return truncate(
-      `exit_code: ${code}${signal}\nerror: ${msg}\n--- stdout ---\n${stdout}\n--- stderr ---\n${stderr}`,
-    );
-  }
+
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      killTree("SIGTERM");
+      setTimeout(() => {
+        if (!settled) killTree("SIGKILL");
+      }, 2_000);
+    }, BASH_TIMEOUT_MS);
+
+    const onAbort = (): void => {
+      cancelledByUser = true;
+      killTree("SIGTERM");
+      setTimeout(() => {
+        if (!settled) killTree("SIGKILL");
+      }, 1_000);
+    };
+    if (signal) {
+      if (signal.aborted) onAbort();
+      else signal.addEventListener("abort", onAbort, { once: true });
+    }
+
+    child.stdout?.on("data", (chunk: Buffer) => {
+      if (stdoutBytes >= BASH_MAX_BUFFER_BYTES) return;
+      const remaining = BASH_MAX_BUFFER_BYTES - stdoutBytes;
+      const slice = chunk.length > remaining ? chunk.subarray(0, remaining) : chunk;
+      stdout += slice.toString("utf8");
+      stdoutBytes += slice.length;
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      if (stderrBytes >= BASH_MAX_BUFFER_BYTES) return;
+      const remaining = BASH_MAX_BUFFER_BYTES - stderrBytes;
+      const slice = chunk.length > remaining ? chunk.subarray(0, remaining) : chunk;
+      stderr += slice.toString("utf8");
+      stderrBytes += slice.length;
+    });
+
+    const finish = (body: string): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (signal) signal.removeEventListener("abort", onAbort);
+      resolve(truncate(body));
+    };
+
+    child.on("error", (err: Error) => {
+      finish(
+        `exit_code: null\nerror: ${err.message}\n--- stdout ---\n${stdout}\n--- stderr ---\n${stderr}`,
+      );
+    });
+
+    child.on("close", (code: number | null, sigName: NodeJS.Signals | null) => {
+      if (cancelledByUser) {
+        finish(
+          `exit_code: null signal=${sigName ?? "SIGTERM"}\ncancelled by user\n--- stdout ---\n${stdout}\n--- stderr ---\n${stderr}`,
+        );
+        return;
+      }
+      if (timedOut) {
+        finish(
+          `exit_code: null signal=${sigName ?? "SIGTERM"}\nerror: command timed out after ${Math.round(BASH_TIMEOUT_MS / 1000)}s\n--- stdout ---\n${stdout}\n--- stderr ---\n${stderr}`,
+        );
+        return;
+      }
+      if (code === 0 && !sigName) {
+        finish(`exit_code: 0\n${stdout}`);
+        return;
+      }
+      const sigInfo = sigName ? ` signal=${sigName}` : "";
+      finish(
+        `exit_code: ${code ?? "null"}${sigInfo}\n--- stdout ---\n${stdout}\n--- stderr ---\n${stderr}`,
+      );
+    });
+  });
 }
 
 type ServerTool = {
@@ -367,26 +459,32 @@ export const TOOL_SCHEMAS: AnyTool[] = [
   },
 ];
 
-type ToolHandler = (args: Record<string, unknown>) => Promise<string>;
+type ToolHandler = (
+  args: Record<string, unknown>,
+  signal?: AbortSignal,
+) => Promise<string>;
 
 export const TOOL_REGISTRY: Record<string, ToolHandler> = {
   read_file: (args) => readFileTool(args as { path: string }),
   list_files: (args) => listFilesTool(args as { path?: string }),
   edit_file: (args) => editFileTool(args as { path: string; content: string }),
-  execute_bash: (args) => executeBashTool(args as { command: string }),
-  fetch_url: (args) => fetchUrlTool(args as { url: string; max_bytes?: number }),
+  execute_bash: (args, signal) =>
+    executeBashTool(args as { command: string }, signal),
+  fetch_url: (args, signal) =>
+    fetchUrlTool(args as { url: string; max_bytes?: number }, signal),
 };
 
 export async function runTool(
   name: string,
   args: Record<string, unknown>,
+  signal?: AbortSignal,
 ): Promise<string> {
   const handler = TOOL_REGISTRY[name];
   if (!handler) {
     return `Error: unknown tool '${name}'. Available: ${Object.keys(TOOL_REGISTRY).join(", ")}`;
   }
   try {
-    return await handler(args);
+    return await handler(args, signal);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return `Error running ${name}: ${msg}`;

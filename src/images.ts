@@ -3,18 +3,12 @@ import path from "node:path";
 import os from "node:os";
 import { execFileSync } from "node:child_process";
 
-const SUPPORTED_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
-
-const MIME_BY_EXT: Record<string, string> = {
-  ".png": "image/png",
-  ".jpg": "image/jpeg",
-  ".jpeg": "image/jpeg",
-  ".gif": "image/gif",
-  ".webp": "image/webp",
-};
-
-const MAX_BYTES_PER_IMAGE = 10 * 1024 * 1024;
-const MAX_IMAGES_PER_PROMPT = 8;
+import {
+  IMAGE_MIME_BY_EXT,
+  IMAGE_SUPPORTED_EXTS,
+  MAX_IMAGES_PER_PROMPT,
+  MAX_IMAGE_BYTES,
+} from "./config.ts";
 
 export interface ParsedImage {
   /** Data URL (for local files) or http(s) URL (passed through). */
@@ -35,7 +29,7 @@ export interface ParseImagesResult {
 
 function hasImageExt(s: string): boolean {
   const lower = s.toLowerCase();
-  for (const ext of SUPPORTED_EXTS) {
+  for (const ext of IMAGE_SUPPORTED_EXTS) {
     if (lower.endsWith(ext)) return true;
   }
   return false;
@@ -116,12 +110,13 @@ function loadLocalImage(absPath: string): ParsedImage {
   if (!stat.isFile()) {
     throw new Error(`not a regular file: ${absPath}`);
   }
-  if (stat.size > MAX_BYTES_PER_IMAGE) {
+  if (stat.size > MAX_IMAGE_BYTES) {
+    const capMb = (MAX_IMAGE_BYTES / 1024 / 1024).toFixed(0);
     throw new Error(
-      `image too large (${(stat.size / 1024 / 1024).toFixed(1)} MB > 10 MB cap): ${absPath}`,
+      `image too large (${(stat.size / 1024 / 1024).toFixed(1)} MB > ${capMb} MB cap): ${absPath}`,
     );
   }
-  const mime = MIME_BY_EXT[extOf(absPath)] ?? "application/octet-stream";
+  const mime = IMAGE_MIME_BY_EXT[extOf(absPath)] ?? "application/octet-stream";
   const buf = fs.readFileSync(absPath);
   const url = `data:${mime};base64,${buf.toString("base64")}`;
   return { url, displayName: absPath, bytes: stat.size };
