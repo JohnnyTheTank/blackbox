@@ -13,12 +13,44 @@ export const OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY";
 // Models / CLI model UX
 export const DEFAULT_MODEL = "google/gemini-3-flash-preview";
 
+// Curated default list of OpenRouter models.
+// All entries below support both tool/function calling and image inputs
+// (modalities: text+image -> text, supported_parameters: tools).
 export const CURATED_MODELS: string[] = [
   "openrouter/elephant-alpha",
   "z-ai/glm-4.5-air:free",
-  "anthropic/claude-sonnet-4.5",
-  "google/gemini-3-flash-preview",
   "nvidia/nemotron-3-super-120b-a12b:free",
+
+  // Anthropic — top coding / agent models
+  "anthropic/claude-opus-4.7",
+  "anthropic/claude-opus-4.6",
+  "anthropic/claude-sonnet-4.6",
+  "anthropic/claude-sonnet-4.5",
+
+  // OpenAI — GPT-5 family incl. Codex specialists
+  "openai/gpt-5.4",
+  "openai/gpt-5.4-mini",
+  "openai/gpt-5.3-codex",
+  "openai/gpt-5.1-codex-max",
+
+  // Google — Gemini 3.x
+  "google/gemini-3.1-pro-preview",
+  "google/gemini-3-flash-preview",
+
+  // xAI
+  "x-ai/grok-4.20",
+
+  // Alibaba Qwen
+  "qwen/qwen3.6-plus",
+
+  // Moonshot
+  "moonshotai/kimi-k2.6",
+
+  // Z.ai
+  "z-ai/glm-4.6v",
+
+  // Mistral
+  "mistralai/mistral-large-2512",
 ];
 
 export const VISION_HINTS: RegExp[] = [
@@ -26,12 +58,18 @@ export const VISION_HINTS: RegExp[] = [
   /gemini/i,
   /gpt-4/i,
   /gpt-5/i,
+  /grok-?\d/i,
   /grok.*vision/i,
   /qwen.*vl/i,
+  /qwen3\.\d/i,
   /llama.*vision/i,
   /pixtral/i,
   /mistral.*pixtral/i,
+  /mistral-large/i,
   /internvl/i,
+  /kimi-k2/i,
+  /glm-?\d.*v/i,
+  /gemma-?4/i,
 ];
 
 // Agent loop
