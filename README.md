@@ -91,6 +91,27 @@ The agent picks the right tools on its own (e.g. `list_files` + `read_file` for
 the first prompt, `fetch_url` for the third, `openrouter:web_search` for the
 fourth, `openrouter:datetime` for the last).
 
+## Images
+
+Any `.png`, `.jpg`, `.jpeg`, `.gif` or `.webp` reference in your prompt is
+auto-attached as an image part for vision-capable models. Three ways to do it:
+
+```text
+> look at ~/Desktop/shot.png and tell me what the error says
+> compare https://example.com/logo.png with ./public/logo.png
+> /paste what is shown in this screenshot?
+```
+
+- **Local files** (absolute, relative, or with `~`) are read from disk and sent
+  as base64 data URLs.
+- **http(s) URLs** are passed through — OpenRouter fetches them for the model.
+- **`/paste`** (macOS only) dumps the clipboard PNG into a temp file via
+  `osascript` and attaches it. An optional prompt after `/paste` is appended.
+
+Limits: max **8 images** per prompt, max **10 MB** per local file. If the
+active model slug does not look vision-capable, a yellow warning is shown but
+the request is still sent.
+
 ## Slash commands
 
 | Command          | Effect                                             |
@@ -99,6 +120,7 @@ fourth, `openrouter:datetime` for the last).
 | `/model`         | Show the current model                             |
 | `/model <slug>`  | Switch model (e.g. `/model google/gemini-2.5-pro`) |
 | `/models`        | Curated list of common tool-capable models         |
+| `/paste [text]`  | Attach the macOS clipboard image (optional text)   |
 | `/reset`         | Clear the chat history                             |
 | `/exit` / `exit` | Quit (also Ctrl-C)                                 |
 
@@ -142,6 +164,7 @@ src/
   agent.ts       # OpenAI SDK client + agentic loop
   tools.ts       # tool schemas + local tool implementations
   sandbox.ts     # WORKSPACE_ROOT + assertInside() guard
+  images.ts      # image detection, base64 loading, /paste clipboard dump
 package.json
 .env.example
 ```
@@ -163,6 +186,10 @@ absolute paths (`cat /etc/hosts`) or an explicit `cd /tmp`.
   know which hosts are "internal" — it could in theory reach
   `http://localhost:…` or intranet URLs. Don't run the agent on machines with
   sensitive internal services unless you're comfortable with that.
+- Image attachments intentionally bypass the workspace sandbox so that
+  screenshots from `~/Desktop` or similar can be used. Only the referenced
+  file is read and base64-encoded — no shell or write access — but a mistyped
+  path elsewhere on disk will still leak that file's contents to OpenRouter.
 - For real sandboxing, wrap it in a container (Docker) or `bwrap`.
 
 ## Scripts

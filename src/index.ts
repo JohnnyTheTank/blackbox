@@ -15,12 +15,20 @@ if (existsSync(envPath) && typeof process.loadEnvFile === "function") {
   }
 }
 
-import { runAgent, buildInitialHistory } from "./agent.ts";
+import type { ChatCompletionContentPart } from "openai/resources/chat/completions";
+import { runAgent, buildInitialHistory, type UserContent } from "./agent.ts";
 import { WORKSPACE_ROOT } from "./sandbox.ts";
+import {
+  parseImages,
+  dumpClipboardImage,
+  formatBytes,
+  type ParsedImage,
+} from "./images.ts";
 
-const DEFAULT_MODEL = "z-ai/glm-4.5-air:free";
+const DEFAULT_MODEL = "openrouter/elephant-alpha";
 
 const CURATED_MODELS = [
+  "openrouter/elephant-alpha",
   "z-ai/glm-4.5-air:free",
   "anthropic/claude-sonnet-4.5",
   "google/gemini-3-flash-preview",
@@ -64,11 +72,55 @@ function printHelp(): void {
       "  /model           Show the current model",
       "  /model <slug>    Switch model (e.g. /model openai/gpt-5)",
       "  /models          Curated list of common tool-capable models",
+      "  /paste [text]    Attach the macOS clipboard image, optionally with text",
       "  /reset           Clear the chat history",
       "  /exit, exit      Quit (also Ctrl-C)",
       "",
+      C.dim(
+        "  Tip: just include an image path or http(s) URL in your prompt —",
+      ),
+      C.dim(
+        "       .png/.jpg/.jpeg/.gif/.webp are auto-attached.",
+      ),
+      "",
     ].join("\n"),
   );
+}
+
+const VISION_HINTS = [
+  /claude/i,
+  /gemini/i,
+  /gpt-4/i,
+  /gpt-5/i,
+  /grok.*vision/i,
+  /qwen.*vl/i,
+  /llama.*vision/i,
+  /pixtral/i,
+  /mistral.*pixtral/i,
+  /internvl/i,
+];
+
+function looksVisionCapable(model: string): boolean {
+  return VISION_HINTS.some((re) => re.test(model));
+}
+
+function logAttachments(images: ParsedImage[]): void {
+  for (const img of images) {
+    const size = img.bytes !== undefined ? ` (${formatBytes(img.bytes)})` : "";
+    console.log(C.dim(`  attached: ${img.displayName}${size}`));
+  }
+}
+
+function buildUserContent(text: string, images: ParsedImage[]): UserContent {
+  if (images.length === 0) return text;
+  const parts: ChatCompletionContentPart[] = [];
+  if (text.length > 0) {
+    parts.push({ type: "text", text });
+  }
+  for (const img of images) {
+    parts.push({ type: "image_url", image_url: { url: img.url } });
+  }
+  return parts;
 }
 
 function printModels(current: string): void {
@@ -159,15 +211,50 @@ async function main(): Promise<void> {
       continue;
     }
 
-    if (entry.startsWith("/")) {
+    let pasteText: string | undefined;
+    if (entry === "/paste" || entry.startsWith("/paste ")) {
+      let clipPath: string;
+      try {
+        clipPath = dumpClipboardImage();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.log(C.red(`/paste failed: ${msg}`));
+        continue;
+      }
+      const rest = entry === "/paste" ? "" : entry.slice("/paste ".length).trim();
+      pasteText = rest.length > 0 ? `${clipPath} ${rest}` : clipPath;
+    } else if (entry.startsWith("/")) {
       console.log(
         C.red(`Unknown command: ${entry}. Use /help to see the list.`),
       );
       continue;
     }
 
+    const promptSource = pasteText ?? entry;
+    const { text, images, warnings } = parseImages(promptSource);
+
+    for (const w of warnings) {
+      console.log(C.yellow(`  ${w}`));
+    }
+
+    if (images.length > 0) {
+      logAttachments(images);
+      if (!looksVisionCapable(model)) {
+        console.log(
+          C.yellow(
+            `  warning: model "${model}" may not support images; sending anyway.`,
+          ),
+        );
+      }
+    }
+
+    const finalText = text.length > 0 ? text : images.length > 0 ? "" : promptSource;
+    if (images.length === 0 && finalText.length === 0) continue;
+
+    const userContent = buildUserContent(finalText, images);
+
     try {
-      const answer = await runAgent(history, entry, model);
+      const answer = await runAgent(history, userContent, model);
       console.log("");
       console.log(answer && answer.length > 0 ? answer : C.dim("(empty response)"));
       console.log("");

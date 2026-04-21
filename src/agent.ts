@@ -1,9 +1,12 @@
 import OpenAI from "openai";
 import type {
+  ChatCompletionContentPart,
   ChatCompletionMessageParam,
   ChatCompletionMessageToolCall,
   ChatCompletionTool,
 } from "openai/resources/chat/completions";
+
+export type UserContent = string | ChatCompletionContentPart[];
 
 import { TOOL_SCHEMAS, runTool } from "./tools.ts";
 import { WORKSPACE_ROOT } from "./sandbox.ts";
@@ -72,12 +75,12 @@ function logToolCall(call: ChatCompletionMessageToolCall): void {
 
 export async function runAgent(
   history: ChatCompletionMessageParam[],
-  userInput: string,
+  userContent: UserContent,
   model: string,
 ): Promise<string> {
   const client = getClient();
 
-  history.push({ role: "user", content: userInput });
+  history.push({ role: "user", content: userContent });
 
   for (let i = 0; i < MAX_ITER; i++) {
     const response = await client.chat.completions.create({
