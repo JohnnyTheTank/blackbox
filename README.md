@@ -1,13 +1,15 @@
 # blackbox
 
-A minimal CLI coding agent (~300 lines of TypeScript) that talks to
-tool-calling-capable LLMs through the [OpenRouter](https://openrouter.ai) API.
-Inspired by the video _"How does Claude Code actually work?"_ — a simple
-"harness" with four tools and a small agentic loop.
+A minimal CLI coding agent in TypeScript that talks to tool-calling-capable
+LLMs through the [OpenRouter](https://openrouter.ai) API. Inspired by the video
+_"How does Claude Code actually work?"_ — a simple "harness" with a handful of
+tools and a small agentic loop.
 
 ## Features
 
-- **Four tools**: `read_file`, `list_files`, `edit_file`, `execute_bash`
+- **Seven tools**: file system (`read_file`, `list_files`, `edit_file`), shell
+  (`execute_bash`), HTTP (`fetch_url`), plus OpenRouter server tools for web
+  search and the current date/time.
 - **Workspace sandbox**: All file access is limited to the directory the CLI is
   started from (`WORKSPACE_ROOT`). `execute_bash` runs with
   `cwd=WORKSPACE_ROOT`.
@@ -73,6 +75,22 @@ The API key is always loaded from the `.env` **inside the blackbox install
 directory** (not from the target project). You configure the key once and can
 then use `blackbox` in any project without exposing the key to it.
 
+## Example prompts
+
+Typical one-liners that exercise the different tools:
+
+```text
+> explain the stack of this project
+> find all TODO comments under src/ and fix them
+> summarize the docs at https://vitejs.dev/guide/
+> search the web for the latest React 19 release notes
+> what time is it in Berlin right now?
+```
+
+The agent picks the right tools on its own (e.g. `list_files` + `read_file` for
+the first prompt, `fetch_url` for the third, `openrouter:web_search` for the
+fourth, `openrouter:datetime` for the last).
+
 ## Slash commands
 
 | Command          | Effect                                             |
@@ -114,19 +132,18 @@ for configuration options (search engine, domain filters, etc.).
 
 Tool results are truncated at ~8000 characters to keep the context small.
 
-> `fetch_url` follows redirects and accepts any public http(s) URL. It does not
-> know which hosts are "internal" — it could in theory reach `http://localhost:…`
-> or intranet URLs. Don't run the agent on machines with sensitive internal
-> services unless you're comfortable with that (YOLO mode).
-
 ## Project layout
 
 ```
+bin/
+  blackbox.mjs   # launcher that spawns tsx on src/index.ts
 src/
-  index.ts     # CLI REPL, slash commands, model switching
-  agent.ts     # OpenAI SDK client + agentic loop
-  tools.ts     # JSON schemas + local tool implementations
-  sandbox.ts   # WORKSPACE_ROOT + assertInside() guard
+  index.ts       # CLI REPL, slash commands, model switching
+  agent.ts       # OpenAI SDK client + agentic loop
+  tools.ts       # tool schemas + local tool implementations
+  sandbox.ts     # WORKSPACE_ROOT + assertInside() guard
+package.json
+.env.example
 ```
 
 ## Security warning (YOLO mode)
@@ -142,10 +159,17 @@ absolute paths (`cat /etc/hosts`) or an explicit `cd /tmp`.
 - Always start the CLI from a test repo, not from your home directory.
 - Do not leave sensitive sessions open (SSH agent, password manager) while the
   agent is running.
+- `fetch_url` follows redirects and accepts any public http(s) URL. It does not
+  know which hosts are "internal" — it could in theory reach
+  `http://localhost:…` or intranet URLs. Don't run the agent on machines with
+  sensitive internal services unless you're comfortable with that.
 - For real sandboxing, wrap it in a container (Docker) or `bwrap`.
 
-## Typecheck
+## Scripts
 
-```bash
-npm run typecheck
-```
+| Script              | What it does                                      |
+| ------------------- | ------------------------------------------------- |
+| `npm run dev`       | Run the CLI against the blackbox repo itself      |
+| `npm run typecheck` | `tsc --noEmit`                                    |
+| `npm run link`      | Register the global `blackbox` command (npm link) |
+| `npm run unlink`    | Remove the global `blackbox` command              |

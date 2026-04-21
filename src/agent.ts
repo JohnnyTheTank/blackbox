@@ -8,7 +8,7 @@ import type {
 import { TOOL_SCHEMAS, runTool } from "./tools.ts";
 import { WORKSPACE_ROOT } from "./sandbox.ts";
 
-const MAX_ITER = 25;
+const MAX_ITER = 50;
 
 export const SYSTEM_PROMPT = `You are a pragmatic CLI coding agent helping a developer in their local project.
 

@@ -18,9 +18,10 @@ if (existsSync(envPath) && typeof process.loadEnvFile === "function") {
 import { runAgent, buildInitialHistory } from "./agent.ts";
 import { WORKSPACE_ROOT } from "./sandbox.ts";
 
-const DEFAULT_MODEL = "anthropic/claude-sonnet-4.5";
+const DEFAULT_MODEL = "z-ai/glm-4.5-air:free";
 
 const CURATED_MODELS = [
+  "z-ai/glm-4.5-air:free",
   "anthropic/claude-sonnet-4.5",
   "google/gemini-3-flash-preview",
   "nvidia/nemotron-3-super-120b-a12b:free",
