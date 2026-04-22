@@ -1,6 +1,8 @@
 import * as readline from "node:readline";
 import { stdin, stdout } from "node:process";
 
+import { C } from "./utils/colors.ts";
+
 export type SelectOption<T> = {
   label: string;
   hint?: string;
@@ -20,13 +22,6 @@ export type SelectConfig<T> = {
 export type SelectResult<T> =
   | { type: "select"; value: T }
   | { type: "action"; key: string; value: T };
-
-const C = {
-  dim: (s: string) => `\x1b[2m${s}\x1b[0m`,
-  bold: (s: string) => `\x1b[1m${s}\x1b[0m`,
-  cyan: (s: string) => `\x1b[36m${s}\x1b[0m`,
-  green: (s: string) => `\x1b[32m${s}\x1b[0m`,
-};
 
 const ESC = "\x1b";
 const HIDE_CURSOR = `${ESC}[?25l`;

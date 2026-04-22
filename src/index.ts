@@ -3,7 +3,7 @@ import * as readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 
 const INSTALL_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const envPath = join(INSTALL_DIR, ".env");
@@ -13,41 +13,6 @@ if (existsSync(envPath) && typeof process.loadEnvFile === "function") {
   } catch {
     // ignore malformed .env
   }
-}
-
-const STATE_PATH = join(INSTALL_DIR, ".blackbox-state.json");
-
-type PersistedState = {
-  model?: string;
-};
-
-function readPersistedState(): PersistedState {
-  if (!existsSync(STATE_PATH)) return {};
-  try {
-    const raw = readFileSync(STATE_PATH, "utf8");
-    const parsed = JSON.parse(raw) as unknown;
-    if (parsed && typeof parsed === "object") {
-      return parsed as PersistedState;
-    }
-    return {};
-  } catch {
-    return {};
-  }
-}
-
-function writePersistedState(state: PersistedState): void {
-  try {
-    writeFileSync(STATE_PATH, JSON.stringify(state, null, 2) + "\n", "utf8");
-  } catch {
-    // persistence is best-effort; ignore write failures
-  }
-}
-
-function persistModel(model: string): void {
-  const state = readPersistedState();
-  if (state.model === model) return;
-  state.model = model;
-  writePersistedState(state);
 }
 
 import type { ChatCompletionContentPart } from "openai/resources/chat/completions";
@@ -63,31 +28,40 @@ import {
 } from "./agent.ts";
 import {
   CURATED_MODELS,
-  DEFAULT_MODEL,
   OPENROUTER_API_KEY_ENV,
   PLAN_DONE_SUFFIX,
   PLAN_FILE_SUFFIX,
-  PLAN_SYSTEM_PROMPT,
   PLANS_DIR,
-  SPINNER_FRAMES,
-  SPINNER_INTERVAL_MS,
-  SYSTEM_PROMPT,
-  TOOL_LIST_ARG_PREVIEW_MAX,
-  TOOL_PREVIEW_MAX_CHARS,
-  TOOL_PREVIEW_MAX_LINES,
-  VISION_HINTS,
   WORKSPACE_ROOT,
 } from "./config.ts";
+import { persistModel } from "./utils/state.ts";
+import { parseModelFlag, resolveInitialModel } from "./utils/cli.ts";
+import { C } from "./utils/colors.ts";
+import { createSpinner, type Spinner } from "./utils/spinner.ts";
+import {
+  formatBytes,
+  formatRuntime,
+  formatToolCallLine,
+  formatToolPreviewBlock,
+  prettyJson,
+  shortenArgs,
+} from "./utils/format.ts";
+import { looksVisionCapable } from "./utils/vision.ts";
+import { sanitizePlanSlug } from "./utils/slug.ts";
+import {
+  initProjectPrompts,
+  listPromptResolutions,
+  loadSystemPrompt,
+  PROMPTS_DIRS,
+} from "./prompts.ts";
 import {
   AGENT_TOOL_SCHEMAS,
   PLAN_TOOL_SCHEMAS,
-  sanitizePlanSlug,
   setSubagentFallbackModel,
 } from "./tools.ts";
 import {
   parseImages,
   dumpClipboardImage,
-  formatBytes,
   type ParsedImage,
 } from "./images.ts";
 import {
@@ -97,7 +71,6 @@ import {
 } from "./select.ts";
 import {
   countRunning,
-  formatRuntime,
   killAll,
   killJob,
   listJobs,
@@ -118,120 +91,6 @@ import {
 import { pickPath } from "./pickPath.ts";
 
 type Mode = "agent" | "plan";
-
-function parseModelFlag(argv: string[]): string | undefined {
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    if (arg === "--model" || arg === "-m") {
-      return argv[i + 1];
-    }
-    if (arg && arg.startsWith("--model=")) {
-      return arg.slice("--model=".length);
-    }
-  }
-  return undefined;
-}
-
-type InitialModelResolution = {
-  model: string;
-  source: "flag" | "persisted" | "default";
-};
-
-function resolveInitialModel(): InitialModelResolution {
-  const fromFlag = parseModelFlag(process.argv.slice(2));
-  if (fromFlag && fromFlag.length > 0) {
-    return { model: fromFlag, source: "flag" };
-  }
-  const persisted = readPersistedState().model;
-  if (persisted && persisted.length > 0) {
-    return { model: persisted, source: "persisted" };
-  }
-  return { model: DEFAULT_MODEL, source: "default" };
-}
-
-const C = {
-  dim: (s: string) => `\x1b[2m${s}\x1b[0m`,
-  bold: (s: string) => `\x1b[1m${s}\x1b[0m`,
-  cyan: (s: string) => `\x1b[36m${s}\x1b[0m`,
-  yellow: (s: string) => `\x1b[33m${s}\x1b[0m`,
-  red: (s: string) => `\x1b[31m${s}\x1b[0m`,
-  green: (s: string) => `\x1b[32m${s}\x1b[0m`,
-  magenta: (s: string) => `\x1b[35m${s}\x1b[0m`,
-};
-
-type Spinner = {
-  start: (label?: string) => void;
-  stop: () => void;
-  log: (line: string) => void;
-};
-
-function createSpinner(): Spinner {
-  const isTTY = Boolean(process.stdout.isTTY);
-  let timer: NodeJS.Timeout | null = null;
-  let frame = 0;
-  let label = "working…";
-
-  const clearLine = (): void => {
-    if (!isTTY) return;
-    process.stdout.write("\r\x1b[2K");
-  };
-
-  const render = (): void => {
-    if (!isTTY) return;
-    const f = SPINNER_FRAMES[frame % SPINNER_FRAMES.length];
-    process.stdout.write(`\r\x1b[2K\x1b[2m${f} ${label}\x1b[0m`);
-  };
-
-  return {
-    start(next?: string) {
-      if (!isTTY || timer) return;
-      if (next) label = next;
-      frame = 0;
-      render();
-      timer = setInterval(() => {
-        frame += 1;
-        render();
-      }, SPINNER_INTERVAL_MS);
-    },
-    stop() {
-      if (timer) {
-        clearInterval(timer);
-        timer = null;
-      }
-      clearLine();
-    },
-    log(line: string) {
-      clearLine();
-      process.stdout.write(`${line}\n`);
-      if (timer) render();
-    },
-  };
-}
-
-function previewResult(result: string): string {
-  const maxLines = TOOL_PREVIEW_MAX_LINES;
-  const maxChars = TOOL_PREVIEW_MAX_CHARS;
-  const trimmed = result.replace(/\s+$/u, "");
-  const lines = trimmed.split("\n");
-  const selected = lines.slice(0, maxLines).join("\n");
-  const truncatedLines = lines.length > maxLines;
-  const truncatedChars = selected.length > maxChars;
-  const body = truncatedChars ? `${selected.slice(0, maxChars)}…` : selected;
-  return truncatedLines && !truncatedChars ? `${body}\n…` : body;
-}
-
-function formatToolCallLine(name: string, args: string): string {
-  return C.dim(`  → ${name}(${args})`);
-}
-
-function formatToolPreviewBlock(result: string): string {
-  const preview = previewResult(result);
-  if (preview.length === 0) return C.dim("    (empty result)");
-  return preview
-    .split("\n")
-    .map((line) => C.dim(`    ${line}`))
-    .join("\n");
-}
 
 function printTools(calls: ToolCallRecord[]): void {
   console.log("");
@@ -255,21 +114,6 @@ function printTools(calls: ToolCallRecord[]): void {
     ),
   );
   console.log("");
-}
-
-function shortenArgs(raw: string): string {
-  const max = TOOL_LIST_ARG_PREVIEW_MAX;
-  const compact = raw.replace(/\s+/g, " ").trim();
-  return compact.length > max ? `${compact.slice(0, max)}…` : compact;
-}
-
-function prettyJson(raw: string): string {
-  if (raw.trim().length === 0) return "(no args)";
-  try {
-    return JSON.stringify(JSON.parse(raw), null, 2);
-  } catch {
-    return raw;
-  }
 }
 
 function printToolDetail(calls: ToolCallRecord[], indexArg: string): void {
@@ -325,6 +169,8 @@ function printHelp(): void {
       "  /jobs log <id>       Tail the log of a job",
       "  /agents              List available subagent definitions (.blackbox/agents/*.md)",
       "  /agents reload       Re-read subagent markdown files from disk",
+      "  /prompts             Show which system-prompt files are active (agent + plan)",
+      "  /prompts init        Copy builtin prompts to .blackbox/prompts/ for editing",
       "  /refs reload         Re-scan the workspace for @-reference autocomplete",
       "  /clear               Clear the chat history (keeps current mode)",
       "  /exit, exit          Quit (also Ctrl-C)",
@@ -344,10 +190,6 @@ function printHelp(): void {
       "",
     ].join("\n"),
   );
-}
-
-function looksVisionCapable(model: string): boolean {
-  return VISION_HINTS.some((re) => re.test(model));
 }
 
 function logAttachments(images: ParsedImage[]): void {
@@ -772,6 +614,48 @@ async function pickJob(
   }
 }
 
+function printPrompts(): void {
+  console.log("");
+  console.log(C.bold("System prompts:"));
+  let resolutions: ReturnType<typeof listPromptResolutions>;
+  try {
+    resolutions = listPromptResolutions();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.log(C.red(`  Failed to resolve prompts: ${msg}`));
+    resolutions = [];
+  }
+  for (const r of resolutions) {
+    const badge =
+      r.source === "project"
+        ? C.green("[project]")
+        : r.source === "user"
+          ? C.cyan("[user]   ")
+          : C.dim("[builtin]");
+    console.log(`  ${badge} ${C.bold(r.name.padEnd(6))} ${C.dim(r.path)}`);
+  }
+  console.log("");
+  console.log(C.dim("Override locations (highest precedence first):"));
+  console.log(C.dim(`  1. ${PROMPTS_DIRS.project}  (project, committed per-repo)`));
+  console.log(C.dim(`  2. ${PROMPTS_DIRS.user}  (user-global)`));
+  console.log(C.dim(`  3. ${PROMPTS_DIRS.builtin}  (shipped defaults)`));
+  console.log("");
+  console.log(
+    C.dim(
+      "Placeholders available in prompt files: {{WORKSPACE_ROOT}}, {{PLANS_DIR}}, {{PLAN_FILE_SUFFIX}}.",
+    ),
+  );
+  console.log(
+    C.dim(
+      "Changes apply on the next /clear, /plan, /agent or fresh session. No restart required.",
+    ),
+  );
+  console.log(
+    C.dim("Run /prompts init to copy the builtin defaults into the project for editing."),
+  );
+  console.log("");
+}
+
 function printAgents(): void {
   const reg = getAgentRegistry();
   const agents = listAgents();
@@ -844,12 +728,12 @@ async function main(): Promise<void> {
   const initial = resolveInitialModel();
   let model = initial.model;
   let mode: Mode = "agent";
-  let history = buildInitialHistory(SYSTEM_PROMPT);
+  const systemPromptFor = (m: Mode): string =>
+    loadSystemPrompt(m === "plan" ? "plan" : "agent");
+
+  let history = buildInitialHistory(systemPromptFor("agent"));
   let lastToolCalls: ToolCallRecord[] = [];
   const spinner = createSpinner();
-
-  const systemPromptFor = (m: Mode): string =>
-    m === "plan" ? PLAN_SYSTEM_PROMPT : SYSTEM_PROMPT;
   const promptPrefix = (): string =>
     mode === "plan" ? C.bold(C.magenta("plan > ")) : C.bold("> ");
 
@@ -1007,6 +891,17 @@ async function main(): Promise<void> {
       clearExitConfirm();
       return;
     }
+    const anyRl = rl as unknown as {
+      line?: string;
+      cursor?: number;
+    };
+    if ((anyRl.line ?? "").length > 0) {
+      anyRl.line = "";
+      anyRl.cursor = 0;
+      refreshRlLine();
+      clearExitConfirm();
+      return;
+    }
     if (pendingExitConfirm) {
       console.log("\n" + C.dim("Bye."));
       shutdownJobs();
@@ -1134,7 +1029,7 @@ async function main(): Promise<void> {
         console.log(C.dim("Already in plan mode."));
       } else {
         mode = "plan";
-        history = buildInitialHistory(PLAN_SYSTEM_PROMPT);
+        history = buildInitialHistory(systemPromptFor("plan"));
         lastToolCalls = [];
         console.log(
           C.magenta("Plan mode active.") +
@@ -1151,7 +1046,7 @@ async function main(): Promise<void> {
         console.log(C.dim("Already in agent mode."));
       } else {
         mode = "agent";
-        history = buildInitialHistory(SYSTEM_PROMPT);
+        history = buildInitialHistory(systemPromptFor("agent"));
         lastToolCalls = [];
         console.log(C.green("Agent mode active."));
       }
@@ -1189,12 +1084,9 @@ async function main(): Promise<void> {
         }
         if (mode !== "plan") {
           mode = "plan";
-          history = buildInitialHistory(PLAN_SYSTEM_PROMPT);
-          lastToolCalls = [];
-        } else {
-          history = buildInitialHistory(PLAN_SYSTEM_PROMPT);
-          lastToolCalls = [];
         }
+        history = buildInitialHistory(systemPromptFor("plan"));
+        lastToolCalls = [];
         console.log(
           C.magenta("Plan mode active.") +
           C.dim(` Refining ${picked.slug} — type your change request.`),
@@ -1218,12 +1110,9 @@ async function main(): Promise<void> {
       if (action === "execute") {
         if (mode !== "agent") {
           mode = "agent";
-          history = buildInitialHistory(SYSTEM_PROMPT);
-          lastToolCalls = [];
-        } else {
-          history = buildInitialHistory(SYSTEM_PROMPT);
-          lastToolCalls = [];
         }
+        history = buildInitialHistory(systemPromptFor("agent"));
+        lastToolCalls = [];
         console.log(
           C.green("Agent mode active.") +
           C.dim(` Executing ${picked.slug}.`),
@@ -1286,6 +1175,32 @@ async function main(): Promise<void> {
         console.log(C.red("/jobs log: job id required. Usage: /jobs log <id>"));
       } else {
         printJobLog(rest);
+      }
+      continue;
+    }
+
+    if (entry === "/prompts") {
+      printPrompts();
+      continue;
+    }
+
+    if (entry === "/prompts init") {
+      const result = initProjectPrompts();
+      if (result.created.length > 0) {
+        console.log(C.green(`Created editable copies in ${result.dir}:`));
+        for (const p of result.created) console.log(C.dim(`  + ${p}`));
+      }
+      if (result.skipped.length > 0) {
+        console.log(C.dim("Skipped (already exist):"));
+        for (const p of result.skipped) console.log(C.dim(`  = ${p}`));
+      }
+      for (const e of result.errors) console.log(C.red(`  ${e}`));
+      if (result.created.length > 0) {
+        console.log(
+          C.dim(
+            "Edit them freely; changes take effect on /clear, /plan, /agent or the next session.",
+          ),
+        );
       }
       continue;
     }

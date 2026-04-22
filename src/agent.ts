@@ -10,15 +10,13 @@ export type UserContent = string | ChatCompletionContentPart[];
 
 import { AGENT_TOOL_SCHEMAS, runTool, type AnyTool } from "./tools.ts";
 import {
-  MAX_ITER,
   OPENROUTER_API_KEY_ENV,
   OPENROUTER_BASE_URL,
   OPENROUTER_HEADERS,
-  SYSTEM_PROMPT,
   TOOL_CALL_ARG_PREVIEW_MAX,
 } from "./config.ts";
-
-export { SYSTEM_PROMPT } from "./config.ts";
+import { shortenArgs } from "./utils/format.ts";
+import { throwIfAborted } from "./utils/abort.ts";
 
 export type ToolCallRecord = {
   name: string;
@@ -73,12 +71,6 @@ function getClient(): OpenAI {
   return cachedClient;
 }
 
-function shortenArgs(raw: string): string {
-  const max = TOOL_CALL_ARG_PREVIEW_MAX;
-  const compact = raw.replace(/\s+/g, " ").trim();
-  return compact.length > max ? `${compact.slice(0, max)}…` : compact;
-}
-
 function describeToolCall(call: ChatCompletionMessageToolCall): {
   name: string;
   args: string;
@@ -88,17 +80,6 @@ function describeToolCall(call: ChatCompletionMessageToolCall): {
     name: call.function.name,
     args: call.function.arguments ?? "",
   };
-}
-
-export class AbortError extends Error {
-  constructor(message = "aborted") {
-    super(message);
-    this.name = "AbortError";
-  }
-}
-
-function throwIfAborted(signal?: AbortSignal): void {
-  if (signal?.aborted) throw new AbortError();
 }
 
 export async function runAgent(
@@ -117,7 +98,7 @@ export async function runAgent(
 
   history.push({ role: "user", content: userContent });
 
-  for (let i = 0; i < MAX_ITER; i++) {
+  while (true) {
     throwIfAborted(signal);
     const response = await client.chat.completions.create(
       {
@@ -144,7 +125,7 @@ export async function runAgent(
       const described = describeToolCall(call);
       if (!described) continue;
       const { name, args } = described;
-      reporter?.onToolCall?.(name, shortenArgs(args));
+      reporter?.onToolCall?.(name, shortenArgs(args, TOOL_CALL_ARG_PREVIEW_MAX));
 
       let parsedArgs: Record<string, unknown> = {};
       let parseError: string | null = null;
@@ -185,15 +166,10 @@ export async function runAgent(
       throwIfAborted(signal);
     }
   }
-
-  return {
-    answer: `(Reached maximum iteration count of ${MAX_ITER}, aborting.)`,
-    toolCalls,
-  };
 }
 
 export function buildInitialHistory(
-  systemPrompt: string = SYSTEM_PROMPT,
+  systemPrompt: string,
 ): ChatCompletionMessageParam[] {
   return [{ role: "system", content: systemPrompt }];
 }

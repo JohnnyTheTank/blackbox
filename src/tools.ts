@@ -5,7 +5,6 @@ import type OpenAI from "openai";
 
 import { assertInside, relToWorkspace } from "./sandbox.ts";
 import {
-  formatRuntime,
   killJob,
   listJobs,
   readJobLog,
@@ -18,24 +17,17 @@ import {
   FETCH_MAX_BYTES_CAP,
   FETCH_TIMEOUT_MS,
   FETCH_USER_AGENT,
-  HTML_ENTITIES,
   LIST_MAX_DEPTH,
   LIST_MAX_ENTRIES,
   LIST_SKIP,
   PLAN_DONE_SUFFIX,
   PLAN_FILE_SUFFIX,
   PLANS_DIR,
-  TOOL_OUTPUT_MAX_CHARS,
   WORKSPACE_ROOT,
 } from "./config.ts";
-
-function truncate(text: string, options?: { hint?: string }): string {
-  if (text.length <= TOOL_OUTPUT_MAX_CHARS) return text;
-  const head = text.slice(0, TOOL_OUTPUT_MAX_CHARS);
-  const dropped = text.length - TOOL_OUTPUT_MAX_CHARS;
-  const hint = options?.hint ? ` — ${options.hint}` : "";
-  return `${head}\n... [truncated, ${dropped} more characters${hint}]`;
-}
+import { formatRuntime, truncate } from "./utils/format.ts";
+import { stripHtml } from "./utils/html.ts";
+import { sanitizePlanSlug } from "./utils/slug.ts";
 
 async function readFileTool(args: {
   path: string;
@@ -119,15 +111,6 @@ async function editFileTool(args: {
   return `Wrote ${relToWorkspace(abs)} (${bytes} bytes)`;
 }
 
-export function sanitizePlanSlug(raw: string): string {
-  const lower = raw.toLowerCase().trim();
-  const cleaned = lower
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 64);
-  return cleaned;
-}
-
 async function writePlanTool(args: {
   slug: string;
   title: string;
@@ -179,24 +162,6 @@ async function writePlanTool(args: {
     ? ` (note: a previous ${slug}${PLAN_DONE_SUFFIX} also exists)`
     : "";
   return `Wrote plan to ${relToWorkspace(abs)} (${bytes} bytes)${note}`;
-}
-
-function stripHtml(html: string): string {
-  let text = html;
-  text = text.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "");
-  text = text.replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "");
-  text = text.replace(/<!--[\s\S]*?-->/g, "");
-  text = text.replace(/<(br|\/p|\/div|\/h[1-6]|\/li|\/tr|li|tr)[^>]*>/gi, "\n");
-  text = text.replace(/<[^>]+>/g, "");
-  text = text.replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)));
-  text = text.replace(/&#x([0-9a-f]+);/gi, (_, h) =>
-    String.fromCodePoint(parseInt(h, 16)),
-  );
-  text = text.replace(/&[a-z]+;/gi, (m) => HTML_ENTITIES[m.toLowerCase()] ?? m);
-  text = text.replace(/[ \t]+/g, " ");
-  text = text.replace(/\n[ \t]+/g, "\n");
-  text = text.replace(/\n{3,}/g, "\n\n");
-  return text.trim();
 }
 
 async function fetchUrlTool(
@@ -519,13 +484,13 @@ async function subagentResultTool(args: {
   if (typeof args.job_id !== "string" || args.job_id.length === 0) {
     throw new Error("subagent_result requires a 'job_id' string");
   }
-  const { getJob, formatRuntime: fmtRuntime } = await import("./jobs.ts");
+  const { getJob } = await import("./jobs.ts");
   const job = getJob(args.job_id);
   if (!job) return `Error: unknown job id '${args.job_id}'`;
   if (job.kind !== "subagent") {
     return `Error: job '${args.job_id}' is a ${job.kind} job, not a subagent. Use read_job_log instead.`;
   }
-  const runtime = fmtRuntime((job.endedAt ?? Date.now()) - job.startedAt);
+  const runtime = formatRuntime((job.endedAt ?? Date.now()) - job.startedAt);
   if (job.status === "running") {
     return `Job ${job.id} is still running (${runtime}). Check again later or use read_job_log('${job.id}') to see progress.`;
   }

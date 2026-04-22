@@ -5,14 +5,9 @@ import {
   REFS_PICKER_MAX_RESULTS,
   REFS_PICKER_PAGE_SIZE,
 } from "./config.ts";
-import { fuzzyRank, scanWorkspace, type RefEntry } from "./refs.ts";
-
-const C = {
-  dim: (s: string) => `\x1b[2m${s}\x1b[0m`,
-  bold: (s: string) => `\x1b[1m${s}\x1b[0m`,
-  cyan: (s: string) => `\x1b[36m${s}\x1b[0m`,
-  yellow: (s: string) => `\x1b[33m${s}\x1b[0m`,
-};
+import { scanWorkspace, type RefEntry } from "./refs.ts";
+import { C } from "./utils/colors.ts";
+import { fuzzyRank } from "./utils/fuzzy.ts";
 
 const ESC = "\x1b";
 const HIDE_CURSOR = `${ESC}[?25l`;
