@@ -546,7 +546,7 @@ async function pickPlan(
   }
 }
 
-type PlanAction = "view" | "refine" | "execute";
+type PlanAction = "view" | "refine" | "execute" | "done";
 
 async function pickPlanAction(
   entry: PlanEntry,
@@ -580,6 +580,13 @@ async function pickPlanAction(
         value: "execute",
       },
     ];
+    if (!entry.done) {
+      options.push({
+        label: "Mark as done",
+        hint: `rename to *${PLAN_DONE_SUFFIX} and archive it`,
+        value: "done",
+      });
+    }
     const picked = await selectFromList<PlanAction>({
       title: `What do you want to do with "${entry.slug}"?`,
       options,
@@ -1190,13 +1197,21 @@ async function main(): Promise<void> {
         }
         console.log(
           C.magenta("Plan mode active.") +
-          C.dim(` Refining ${picked.slug}.`),
+          C.dim(` Refining ${picked.slug} — type your change request.`),
         );
-        const seed =
-          `I want to refine the plan \`${picked.slug}\` at ${picked.relPath}.\n\n` +
-          `Current content:\n\n${planContent.replace(/\s+$/u, "")}\n\n` +
-          `Ask me one concrete question via ask_user about what I want to change, then update the file using write_plan with the same slug "${picked.slug}". Do not call write_plan until you have my answer.`;
-        await runOneTurn(seed);
+        history.push({
+          role: "user",
+          content:
+            `I want to refine the plan \`${picked.slug}\` at ${picked.relPath}.\n\n` +
+            `Current content:\n\n${planContent.replace(/\s+$/u, "")}\n\n` +
+            `When I send my next message, treat it as the refinement request. ` +
+            `Update the file using write_plan with the same slug "${picked.slug}". ` +
+            `Do not call write_plan before I tell you what to change.`,
+        });
+        history.push({
+          role: "assistant",
+          content: `Plan \`${picked.slug}\` loaded. What would you like to change?`,
+        });
         continue;
       }
 
@@ -1219,6 +1234,11 @@ async function main(): Promise<void> {
           `If something is ambiguous, stop and ask instead of guessing. ` +
           `Do not mark the plan as done; the user will do that afterwards.`;
         await runOneTurn(seed);
+        continue;
+      }
+
+      if (action === "done") {
+        await markPlanDone(picked.slug);
         continue;
       }
       continue;
