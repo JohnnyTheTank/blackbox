@@ -1,6 +1,8 @@
 import OpenAI from "openai";
 import type {
+  ChatCompletion,
   ChatCompletionContentPart,
+  ChatCompletionCreateParamsNonStreaming,
   ChatCompletionMessageParam,
   ChatCompletionMessageToolCall,
   ChatCompletionTool,
@@ -16,7 +18,8 @@ import {
   TOOL_CALL_ARG_PREVIEW_MAX,
 } from "./config.ts";
 import { shortenArgs } from "./utils/format.ts";
-import { throwIfAborted } from "./utils/abort.ts";
+import { AbortError, throwIfAborted } from "./utils/abort.ts";
+import { formatApiError, isAbortError } from "./utils/apiError.ts";
 
 export type ToolCallRecord = {
   name: string;
@@ -27,6 +30,13 @@ export type ToolCallRecord = {
 export type AgentReporter = {
   onToolCall?: (name: string, args: string) => void;
   onToolResult?: (name: string, result: string) => void;
+  onApiRetry?: (info: {
+    attempt: number;
+    maxAttempts: number;
+    waitMs: number;
+    summary: string;
+    status?: number;
+  }) => void;
 };
 
 export type AgentResult = {
@@ -62,8 +72,14 @@ function createClient(): OpenAI {
     apiKey,
     baseURL: OPENROUTER_BASE_URL,
     defaultHeaders: OPENROUTER_HEADERS,
+    maxRetries: MAX_SDK_RETRIES,
   });
 }
+
+const MAX_SDK_RETRIES = 3;
+const MAX_AGENT_ATTEMPTS = 4;
+const RETRY_BASE_DELAY_MS = 1_000;
+const RETRY_MAX_DELAY_MS = 16_000;
 
 let cachedClient: OpenAI | null = null;
 function getClient(): OpenAI {
@@ -97,17 +113,30 @@ export async function runAgent(
   const allowedTools = options?.allowedTools;
 
   history.push({ role: "user", content: userContent });
+  const historyLengthBeforeCall = history.length;
 
   while (true) {
     throwIfAborted(signal);
-    const response = await client.chat.completions.create(
-      {
-        model,
-        messages: history,
-        tools: toolSchemas as ChatCompletionTool[],
-      },
-      { signal },
-    );
+    let response;
+    try {
+      response = await createChatCompletion(
+        client,
+        {
+          model,
+          messages: history,
+          tools: toolSchemas as ChatCompletionTool[],
+        },
+        signal,
+        reporter,
+      );
+    } catch (err) {
+      if (isAbortError(err)) throw err;
+      // Roll back everything we appended during this turn, including the
+      // user prompt, so the caller can retry without a dangling user turn
+      // at the tail of history.
+      history.length = historyLengthBeforeCall - 1;
+      throw err;
+    }
 
     const choice = response.choices[0];
     if (!choice) {
@@ -172,6 +201,65 @@ export function buildInitialHistory(
   systemPrompt: string,
 ): ChatCompletionMessageParam[] {
   return [{ role: "system", content: systemPrompt }];
+}
+
+async function createChatCompletion(
+  client: OpenAI,
+  params: ChatCompletionCreateParamsNonStreaming,
+  signal: AbortSignal | undefined,
+  reporter: AgentReporter | undefined,
+): Promise<ChatCompletion> {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= MAX_AGENT_ATTEMPTS; attempt++) {
+    throwIfAborted(signal);
+    try {
+      const response = await client.chat.completions.create(params, { signal });
+      return response;
+    } catch (err) {
+      if (isAbortError(err)) throw err;
+      lastErr = err;
+      const formatted = formatApiError(err);
+      const isLastAttempt = attempt >= MAX_AGENT_ATTEMPTS;
+      if (!formatted.retryable || isLastAttempt) throw err;
+      const waitMs = nextBackoff(attempt);
+      reporter?.onApiRetry?.({
+        attempt,
+        maxAttempts: MAX_AGENT_ATTEMPTS,
+        waitMs,
+        summary: formatted.summary,
+        status: formatted.status,
+      });
+      await sleepWithAbort(waitMs, signal);
+    }
+  }
+  throw lastErr;
+}
+
+function nextBackoff(attempt: number): number {
+  const exp = Math.min(
+    RETRY_MAX_DELAY_MS,
+    RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1),
+  );
+  const jitter = Math.round(Math.random() * 500);
+  return exp + jitter;
+}
+
+function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new AbortError());
+      return;
+    }
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(new AbortError());
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 async function runAskUser(

@@ -47,6 +47,7 @@ import {
   shortenArgs,
 } from "./utils/format.ts";
 import { looksVisionCapable } from "./utils/vision.ts";
+import { formatApiError } from "./utils/apiError.ts";
 import { sanitizePlanSlug } from "./utils/slug.ts";
 import {
   initProjectPrompts,
@@ -933,6 +934,14 @@ async function main(): Promise<void> {
       onToolResult: (_name, result) => {
         spinner.log(formatToolPreviewBlock(result));
       },
+      onApiRetry: ({ attempt, maxAttempts, waitMs, summary }) => {
+        const waitSec = (waitMs / 1000).toFixed(1);
+        spinner.log(
+          C.yellow(
+            `  API error (attempt ${attempt}/${maxAttempts}): ${summary} — retrying in ${waitSec}s…`,
+          ),
+        );
+      },
     };
 
     const abort = new AbortController();
@@ -978,13 +987,26 @@ async function main(): Promise<void> {
       console.log("");
     } catch (err) {
       spinner.stop();
-      if (abort.signal.aborted) {
+      const formatted = formatApiError(err);
+      if (abort.signal.aborted || formatted.isAbort) {
         history.length = historyBefore;
         console.log("");
         console.log(C.yellow("Cancelled.") + "\n");
       } else {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.log(C.red(`\nError: ${msg}\n`));
+        console.log("");
+        console.log(C.red(`Error: ${formatted.summary}`));
+        for (const d of formatted.details) {
+          console.log(C.dim(`  ${d}`));
+        }
+        console.log(C.dim(`  model: ${model}`));
+        if (formatted.retryable) {
+          console.log(
+            C.dim(
+              "  (transient — retried automatically; you can resend the same prompt to try again.)",
+            ),
+          );
+        }
+        console.log("");
       }
     } finally {
       currentAbort = null;
