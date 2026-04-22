@@ -1,11 +1,6 @@
 export { WORKSPACE_ROOT } from "./sandbox.ts";
 
 // OpenRouter / API
-export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
-export const OPENROUTER_HEADERS: Record<string, string> = {
-  "HTTP-Referer": "https://github.com/JohnnyTheTank/blackbox",
-  "X-Title": "blackbox-cli-agent",
-};
 export const OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY";
 
 // Models / CLI model UX

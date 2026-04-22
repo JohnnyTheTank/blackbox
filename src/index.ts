@@ -15,16 +15,16 @@ if (existsSync(envPath) && typeof process.loadEnvFile === "function") {
   }
 }
 
-import type { ChatCompletionContentPart } from "openai/resources/chat/completions";
 import {
+  appendInputMessages,
   runAgent,
   buildInitialHistory,
   type AgentReporter,
-  type AskUserHandler,
-  type AskUserRequest,
+  type AgentState,
   type RunAgentOptions,
   type ToolCallRecord,
   type UserContent,
+  type UserContentPart,
 } from "./agent.ts";
 import {
   CURATED_MODELS,
@@ -56,9 +56,11 @@ import {
   PROMPTS_DIRS,
 } from "./prompts.ts";
 import {
-  AGENT_TOOL_SCHEMAS,
-  PLAN_TOOL_SCHEMAS,
+  AGENT_TOOLS,
+  PLAN_TOOLS,
   setSubagentFallbackModel,
+  type AskUserHandler,
+  type AskUserRequest,
 } from "./tools.ts";
 import {
   parseImages,
@@ -202,12 +204,12 @@ function logAttachments(images: ParsedImage[]): void {
 
 function buildUserContent(text: string, images: ParsedImage[]): UserContent {
   if (images.length === 0) return text;
-  const parts: ChatCompletionContentPart[] = [];
+  const parts: UserContentPart[] = [];
   if (text.length > 0) {
-    parts.push({ type: "text", text });
+    parts.push({ type: "input_text", text });
   }
   for (const img of images) {
-    parts.push({ type: "image_url", image_url: { url: img.url } });
+    parts.push({ type: "input_image", detail: "auto", imageUrl: img.url });
   }
   return parts;
 }
@@ -732,7 +734,7 @@ async function main(): Promise<void> {
   const systemPromptFor = (m: Mode): string =>
     loadSystemPrompt(m === "plan" ? "plan" : "agent");
 
-  let history = buildInitialHistory(systemPromptFor("agent"));
+  let history: AgentState = buildInitialHistory(systemPromptFor("agent"));
   let lastToolCalls: ToolCallRecord[] = [];
   const spinner = createSpinner();
   const promptPrefix = (): string =>
@@ -934,28 +936,20 @@ async function main(): Promise<void> {
       onToolResult: (_name, result) => {
         spinner.log(formatToolPreviewBlock(result));
       },
-      onApiRetry: ({ attempt, maxAttempts, waitMs, summary }) => {
-        const waitSec = (waitMs / 1000).toFixed(1);
-        spinner.log(
-          C.yellow(
-            `  API error (attempt ${attempt}/${maxAttempts}): ${summary} — retrying in ${waitSec}s…`,
-          ),
-        );
-      },
     };
 
     const abort = new AbortController();
     currentAbort = abort;
-    const historyBefore = history.length;
+    const historyBefore = history;
     clearExitConfirm();
 
     const runOptions: RunAgentOptions =
       mode === "plan"
         ? {
-          toolSchemas: PLAN_TOOL_SCHEMAS,
+          tools: PLAN_TOOLS,
           askUser: makeAskUser(rl, spinner),
         }
-        : { toolSchemas: AGENT_TOOL_SCHEMAS };
+        : { tools: AGENT_TOOLS };
 
     const runningBg = countRunning();
     const spinnerLabel =
@@ -964,7 +958,7 @@ async function main(): Promise<void> {
         : "working…";
     spinner.start(spinnerLabel);
     try {
-      const { answer, toolCalls } = await runAgent(
+      const { answer, state: nextState, toolCalls } = await runAgent(
         history,
         userContent,
         model,
@@ -973,6 +967,7 @@ async function main(): Promise<void> {
         runOptions,
       );
       spinner.stop();
+      history = nextState;
       lastToolCalls = toolCalls;
       console.log("");
       console.log(answer && answer.length > 0 ? answer : C.dim("(empty response)"));
@@ -989,10 +984,11 @@ async function main(): Promise<void> {
       spinner.stop();
       const formatted = formatApiError(err);
       if (abort.signal.aborted || formatted.isAbort) {
-        history.length = historyBefore;
+        history = historyBefore;
         console.log("");
         console.log(C.yellow("Cancelled.") + "\n");
       } else {
+        history = historyBefore;
         console.log("");
         console.log(C.red(`Error: ${formatted.summary}`));
         for (const d of formatted.details) {
@@ -1001,9 +997,7 @@ async function main(): Promise<void> {
         console.log(C.dim(`  model: ${model}`));
         if (formatted.retryable) {
           console.log(
-            C.dim(
-              "  (transient — retried automatically; you can resend the same prompt to try again.)",
-            ),
+            C.dim("  (transient — resend the same prompt to try again.)"),
           );
         }
         console.log("");
@@ -1113,19 +1107,21 @@ async function main(): Promise<void> {
           C.magenta("Plan mode active.") +
           C.dim(` Refining ${picked.slug} — type your change request.`),
         );
-        history.push({
-          role: "user",
-          content:
-            `I want to refine the plan \`${picked.slug}\` at ${picked.relPath}.\n\n` +
-            `Current content:\n\n${planContent.replace(/\s+$/u, "")}\n\n` +
-            `When I send my next message, treat it as the refinement request. ` +
-            `Update the file using write_plan with the same slug "${picked.slug}". ` +
-            `Do not call write_plan before I tell you what to change.`,
-        });
-        history.push({
-          role: "assistant",
-          content: `Plan \`${picked.slug}\` loaded. What would you like to change?`,
-        });
+        history = appendInputMessages(history, [
+          {
+            role: "user",
+            content:
+              `I want to refine the plan \`${picked.slug}\` at ${picked.relPath}.\n\n` +
+              `Current content:\n\n${planContent.replace(/\s+$/u, "")}\n\n` +
+              `When I send my next message, treat it as the refinement request. ` +
+              `Update the file using write_plan with the same slug "${picked.slug}". ` +
+              `Do not call write_plan before I tell you what to change.`,
+          },
+          {
+            role: "assistant",
+            content: `Plan \`${picked.slug}\` loaded. What would you like to change?`,
+          },
+        ]);
         continue;
       }
 

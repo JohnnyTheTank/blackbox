@@ -22,8 +22,10 @@ Requires Node.js >= 20.12.
 ## Features
 
 - **Local tools**: `read_file`, `list_files`, `edit_file`,
-  `execute_bash`, `fetch_url`, plus two OpenRouter server tools
-  (`web_search`, `datetime`).
+  `execute_bash`, `fetch_url`. (Note: the OpenRouter server tools
+  `web_search` and `datetime` were temporarily removed during the migration
+  to `@openrouter/agent`; they will be reintroduced via `serverTool()` in a
+  follow-up.)
 - **Workspace sandbox**: file tools are hard-pinned to `cwd`;
   `execute_bash` runs with `cwd` as its working directory.
 - **Agentic loop**: runs until the model stops emitting tool calls;

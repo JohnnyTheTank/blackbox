@@ -8,7 +8,7 @@ import {
   type AgentReporter,
   type RunAgentOptions,
 } from "./agent.ts";
-import { AGENT_TOOL_SCHEMAS, TOOL_REGISTRY, type AnyTool } from "./tools.ts";
+import { ALL_TOOL_NAMES, filterAgentTools } from "./tools.ts";
 import { WORKSPACE_ROOT } from "./sandbox.ts";
 import {
   appendSubagentLog,
@@ -102,10 +102,11 @@ function loadAgentsFromDir(dir: string): { agents: AgentDefinition[]; errors: st
     const tools = parseToolList(meta.tools);
 
     if (tools !== null) {
-      const invalid = tools.filter((t) => !(t in TOOL_REGISTRY));
+      const known = new Set(ALL_TOOL_NAMES);
+      const invalid = tools.filter((t) => !known.has(t));
       if (invalid.length > 0) {
         errors.push(
-          `${absPath}: unknown tool(s) in 'tools': ${invalid.join(", ")}. Available: ${Object.keys(TOOL_REGISTRY).join(", ")}`,
+          `${absPath}: unknown tool(s) in 'tools': ${invalid.join(", ")}. Available: ${ALL_TOOL_NAMES.join(", ")}`,
         );
         continue;
       }
@@ -164,16 +165,6 @@ export function getAgent(name: string): AgentDefinition | undefined {
   return getAgentRegistry().agents.get(name);
 }
 
-function filterToolSchemas(allowed: Set<string> | null): AnyTool[] {
-  if (allowed === null) return AGENT_TOOL_SCHEMAS;
-  return AGENT_TOOL_SCHEMAS.filter((tool) => {
-    if (tool.type === "function") {
-      return allowed.has(tool.function.name);
-    }
-    return false;
-  });
-}
-
 export type SpawnSubagentOptions = {
   fallbackModel: string;
 };
@@ -211,7 +202,7 @@ export function spawnSubagentJob(
 
   const allowedSet: Set<string> | null =
     agent.tools === null ? null : new Set(agent.tools);
-  const schemas = filterToolSchemas(allowedSet);
+  const tools = filterAgentTools(allowedSet);
 
   const reporter: AgentReporter = {
     onToolCall: (name, args) => {
@@ -228,8 +219,7 @@ export function spawnSubagentJob(
   const history = buildInitialHistory(agent.systemPrompt);
   const model = agent.model ?? options.fallbackModel;
   const runOptions: RunAgentOptions = {
-    toolSchemas: schemas,
-    allowedTools: allowedSet ?? undefined,
+    tools,
   };
 
   void (async () => {

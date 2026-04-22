@@ -1,4 +1,9 @@
-import OpenAI from "openai";
+import {
+  ConnectionError,
+  OpenRouterError,
+  RequestAbortedError,
+  RequestTimeoutError,
+} from "@openrouter/sdk/models/errors";
 
 import { AbortError } from "./abort.ts";
 
@@ -24,11 +29,17 @@ const RETRYABLE_NODE_CODES = new Set([
   "UND_ERR_SOCKET",
 ]);
 
+// HTTP status codes that map to OpenRouterError subclasses known to be
+// safely retryable: 408 timeout, 409 conflict (rare on LLM endpoints),
+// 429 rate-limit, and the 5xx family commonly used by upstream providers.
+const RETRYABLE_STATUS_CODES = new Set([408, 409, 425, 429, 500, 502, 503, 504, 524, 529]);
+
 export function isAbortError(err: unknown): boolean {
   if (err instanceof AbortError) return true;
-  if (err instanceof OpenAI.APIUserAbortError) return true;
+  if (err instanceof RequestAbortedError) return true;
+  if (err instanceof RequestTimeoutError) return true;
   const name = (err as { name?: unknown } | null)?.name;
-  return name === "AbortError";
+  return name === "AbortError" || name === "RequestAbortedError";
 }
 
 export function formatApiError(err: unknown): FormattedApiError {
@@ -36,9 +47,9 @@ export function formatApiError(err: unknown): FormattedApiError {
     return { summary: "aborted", details: [], retryable: false, isAbort: true };
   }
 
-  if (err instanceof OpenAI.APIConnectionError) {
-    const cause = (err as { cause?: unknown }).cause;
+  if (err instanceof ConnectionError) {
     const details: string[] = [];
+    const cause = err.cause;
     const causeCode = nodeErrnoCode(cause);
     if (causeCode) details.push(`code: ${causeCode}`);
     const causeMsg = cause instanceof Error ? cause.message : undefined;
@@ -53,35 +64,37 @@ export function formatApiError(err: unknown): FormattedApiError {
     };
   }
 
-  if (err instanceof OpenAI.APIError) {
-    const status = typeof err.status === "number" ? err.status : undefined;
-    const body = (err.error ?? undefined) as Record<string, unknown> | undefined;
-    const bodyError = pickErrorObject(body);
-    const bodyMessage = typeof bodyError?.message === "string" ? bodyError.message : undefined;
+  if (err instanceof OpenRouterError) {
+    const status = err.statusCode;
+    const parsed = parseBody(err.body, err.contentType);
+    const bodyError = pickErrorObject(parsed);
+    const bodyMessage =
+      typeof bodyError?.message === "string" ? bodyError.message : undefined;
 
-    const statusPart = status !== undefined ? `${status}` : "(no status)";
-    const defaultStatusText = defaultStatusMessage(status);
-    const msgPart = bodyMessage ?? stripStatusPrefix(err.message, status, defaultStatusText);
+    const statusPart = `${status}`;
+    const defaultStatusText = STATUS_TEXT[status];
+    const msgPart =
+      bodyMessage ?? stripStatusPrefix(err.message, status, defaultStatusText);
     const summary =
       msgPart && msgPart.length > 0
         ? `${statusPart} ${msgPart}`
         : `${statusPart}${defaultStatusText ? ` ${defaultStatusText}` : ""}`;
 
     const details: string[] = [];
-    const bodyCode = bodyError?.code ?? err.code;
+    const bodyCode = bodyError?.code;
     if (bodyCode !== undefined && bodyCode !== null && String(bodyCode).length > 0) {
       details.push(`code: ${String(bodyCode)}`);
     }
-    const bodyType = typeof bodyError?.type === "string" ? bodyError.type : err.type;
+    const bodyType = typeof bodyError?.type === "string" ? bodyError.type : undefined;
     if (bodyType) details.push(`type: ${bodyType}`);
 
-    const provider = extractProvider(body, bodyError);
+    const provider = extractProvider(parsed, bodyError);
     if (provider) details.push(`provider: ${provider}`);
 
-    const requestId = err.request_id ?? headerValue(err.headers, "x-request-id");
+    const requestId = headerValue(err.headers, "x-request-id");
     if (requestId) details.push(`request id: ${requestId}`);
 
-    const metadata = (bodyError?.metadata ?? body?.metadata) as
+    const metadata = (bodyError?.metadata ?? parsed?.metadata) as
       | Record<string, unknown>
       | undefined;
     if (metadata && typeof metadata === "object") {
@@ -95,14 +108,13 @@ export function formatApiError(err: unknown): FormattedApiError {
       }
     }
 
-    const retryable =
-      status === 408 ||
-      status === 409 ||
-      status === 425 ||
-      status === 429 ||
-      (status !== undefined && status >= 500 && status < 600);
-
-    return { summary, details, retryable, status, isAbort: false };
+    return {
+      summary,
+      details,
+      retryable: RETRYABLE_STATUS_CODES.has(status),
+      status,
+      isAbort: false,
+    };
   }
 
   if (err instanceof Error) {
@@ -123,6 +135,27 @@ export function formatApiError(err: unknown): FormattedApiError {
     retryable: false,
     isAbort: false,
   };
+}
+
+function parseBody(
+  body: string | undefined,
+  contentType: string | undefined,
+): Record<string, unknown> | undefined {
+  if (!body || body.length === 0) return undefined;
+  const looksJson =
+    (contentType ?? "").includes("json") ||
+    body.trimStart().startsWith("{") ||
+    body.trimStart().startsWith("[");
+  if (!looksJson) return undefined;
+  try {
+    const parsed = JSON.parse(body);
+    if (parsed && typeof parsed === "object") {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // ignore — non-JSON body
+  }
+  return undefined;
 }
 
 function pickErrorObject(
@@ -163,7 +196,7 @@ function headerValue(headers: unknown, name: string): string | undefined {
       const v = (getFn as (k: string) => string | null).call(headers, name);
       if (typeof v === "string" && v.length > 0) return v;
     } catch {
-      // fall through to object access below
+      // fall through to plain-object access below
     }
   }
   if (typeof headers === "object") {
@@ -199,18 +232,16 @@ const STATUS_TEXT: Record<number, string> = {
   404: "Not Found",
   408: "Request Timeout",
   409: "Conflict",
+  413: "Payload Too Large",
   422: "Unprocessable Entity",
   429: "Too Many Requests",
   500: "Internal Server Error",
   502: "Bad Gateway",
   503: "Service Unavailable",
   504: "Gateway Timeout",
+  524: "Edge Network Timeout",
+  529: "Provider Overloaded",
 };
-
-function defaultStatusMessage(status: number | undefined): string | undefined {
-  if (status === undefined) return undefined;
-  return STATUS_TEXT[status];
-}
 
 function stripStatusPrefix(
   message: string | undefined,
